@@ -1,0 +1,25 @@
+Attaching the updated BUILDATHON.md.
+
+Do not modify: the curveball section (already written), or the cross-repository table in Known limitations.
+
+Fill the three remaining <!-- FILL --> blocks:
+
+Graph findings and verification — the search/definition lookup, the pre-edit impact analysis, the final semantic diff, current edge count, and one place where you verified Graph output against source and found it correct or incomplete.
+Checkpoint links — IDs and entire.io URLs for checkpoints 3 and 4, and what each proves.
+Real transcripts are noisy — state whether the URL guard fixed it, and keep the honest note that long single-turn prompts still degrade ranking.
+
+Update all numbers throughout: 27 Rust tests, 19 Go recall tests, 126 checkpoints ingested (was 3), verify-offline result, the coverage line.
+
+Add to data provenance: recall/bench/bench_840.json is generated from upstream entireio/cli public commit history. GitHub secret scanning flags an AWS Access Key ID in it — that string is Entire's own fixture for testing their secret-redaction feature, present across many upstream commits, allowlisted as test data, not a live credential.
+
+Then run entire graph diff for main→HEAD and give me the raw output. Commit both with a valid trailer — that is checkpoint #4.'/home/voxmastery/Desktop/cli/BUILDATHON.md'
+
+---
+
+<task-notification>
+<task-id>bkluc287c</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/tmp/claude-1000/-home-voxmastery-Desktop-cli/a18af583-9099-4691-a142-a7f1c592aca2/tasks/bkluc287c.output</output-file>
+<status>completed</status>
+<summary>Background command "Warm the graph cache at the new HEAD and re-ingest recall memory" completed (exit code 0)</summary>
+</task-notification>
