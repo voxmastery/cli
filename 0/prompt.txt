@@ -1,0 +1,21 @@
+continue
+
+---
+
+<task-notification>
+<task-id>bh3dz9kud</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/tmp/claude-1000/-home-voxmastery-Desktop-cli/1108ead7-3219-47e6-aebb-9e25067f3f27/tasks/bh3dz9kud.output</output-file>
+<status>completed</status>
+<summary>Background command "Install Go 1.26.6 into ~/.local/go (user-space, no sudo)" completed (exit code 0)</summary>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b8hdaahed</task-id>
+<tool-use-id>toolu_01ERR7wwkypuvoRhC6r5tFak</tool-use-id>
+<output-file>/tmp/claude-1000/-home-voxmastery-Desktop-cli/1108ead7-3219-47e6-aebb-9e25067f3f27/tasks/b8hdaahed.output</output-file>
+<status>completed</status>
+<summary>Background command "Run the full cli package test suite" completed (exit code 0)</summary>
+</task-notification>

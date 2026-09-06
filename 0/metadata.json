@@ -1,0 +1,138 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1TNEYKC9VM69ZJ801XDJT4P",
+  "session_id": "1108ead7-3219-47e6-aebb-9e25067f3f27",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-06T06:11:04.750267569Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    "CLAUDE.md",
+    "cmd/entire/cli/agent_help_cmd.go",
+    "cmd/entire/cli/experimental_wiring_test.go",
+    "cmd/entire/cli/explain_export_test.go",
+    "cmd/entire/cli/labs.go",
+    "cmd/entire/cli/recall_cmd.go",
+    "cmd/entire/cli/recall_cmd_test.go",
+    "cmd/entire/cli/recall_collect.go",
+    "cmd/entire/cli/root.go",
+    "recall/Cargo.lock",
+    "recall/Cargo.toml",
+    "recall/bench/bench_840.json",
+    "recall/examples/bench.rs",
+    "recall/examples/grader_ref.rs",
+    "recall/fixtures/checkpoints.json",
+    "recall/reference/grader_main.rs.ref",
+    "recall/reference/main.rs.ref",
+    "recall/src/agreement.rs",
+    "recall/src/graph.rs",
+    "recall/src/ingest.rs",
+    "recall/src/lib.rs",
+    "recall/src/main.rs",
+    "recall/src/model.rs",
+    "recall/src/rank.rs",
+    "recall/src/text.rs",
+    "recall/tests/port.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5-1",
+  "turn_id": "177079bfed4e",
+  "checkpoint_transcript_start": 884,
+  "transcript_lines_at_start": 884,
+  "compact_transcript_start": 20,
+  "token_usage": {
+    "input_tokens": 614,
+    "cache_creation_tokens": 324393,
+    "cache_read_tokens": 6406363,
+    "output_tokens": 53253,
+    "api_call_count": 23
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_017CxKYbyAzxGRCfAxpsjVh4",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "56b4cfcba17d",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 36,
+        "end": 37,
+        "entry_ids": [
+          "c38816fa-6222-4130-90e1-c9a2730d4c17"
+        ],
+        "tool_use_id": "toolu_017CxKYbyAzxGRCfAxpsjVh4"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017CxKYbyAzxGRCfAxpsjVh4"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "initial_attribution": {
+    "calculated_at": "2026-09-06T06:11:04.583103427Z",
+    "agent_lines": 1452,
+    "agent_removed": 7,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 3,
+    "total_committed": 1452,
+    "total_lines_changed": 1462,
+    "agent_percentage": 99.79480164158687,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 3903,
+      "user_lines_removed": 3,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".gitignore": 4,
+        "CLAUDE.md": 13,
+        "cmd/entire/cli/agent_help_cmd.go": 4,
+        "cmd/entire/cli/experimental_wiring_test.go": 1,
+        "cmd/entire/cli/labs.go": 6,
+        "cmd/entire/cli/recall_cmd.go": 199,
+        "cmd/entire/cli/recall_cmd_test.go": 179,
+        "cmd/entire/cli/recall_collect.go": 193,
+        "cmd/entire/cli/root.go": 1,
+        "recall/Cargo.lock": 1081,
+        "recall/Cargo.toml": 9,
+        "recall/bench/bench_840.json": 1,
+        "recall/bench/grader_main.rs.ref": 279,
+        "recall/examples/bench.rs": 86,
+        "recall/fixtures/checkpoints.json": 111,
+        "recall/src/agreement.rs": 137,
+        "recall/src/graph.rs": 162,
+        "recall/src/ingest.rs": 127,
+        "recall/src/lib.rs": 12,
+        "recall/src/main.rs": 188,
+        "recall/src/model.rs": 39,
+        "recall/src/rank.rs": 107,
+        "recall/src/reference_main.rs.ref": 660,
+        "recall/src/text.rs": 127,
+        "recall/tests/port.rs": 177
+      },
+      "user_removed_per_file": {
+        "CLAUDE.md": 1,
+        "cmd/entire/cli/experimental_wiring_test.go": 1,
+        "cmd/entire/cli/explain_export_test.go": 1
+      }
+    }
+  ]
+}
