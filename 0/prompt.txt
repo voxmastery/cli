@@ -1,0 +1,79 @@
+Paste this whole block into the session:
+
+---
+
+# entire recall — Buildathon build brief
+
+## Event context
+BTW Buildathon 2026, Bengaluru. Track 1 (Checkpoint-Native DX).
+Rules: https://build.bengalurutechweek.com/
+Participant guide: https://docs.google.com/document/d/REDACTED/edit
+
+Hard constraints from those:
+- Submission deadline **3:00 PM IST**. Stable-state commit at **11:45 AM**, curveball at 12:00.
+- Four checkpoints are mandatory: (1) initial understanding + architecture, (2) last stable state pre-noon, (3) curveball response, (4) final implementation + verification.
+- Graph evidence must include: a definition/search lookup, an impact analysis *before* a risky change, and a final semantic-diff analysis.
+- Scoring: problem 20, technical 25, curveball 15, checkpoints 15, graph 15, demo 10.
+
+## What we're building
+`entire recall` — a subcommand that turns Checkpoint history into associative, provenance-weighted memory, so a fresh agent session can ask "what did we decide and why" and get ranked, trust-scored answers instead of a transcript dump.
+
+Setup already done: mirror on India region, `entire enable` with claude-code, graph v0.4.0 installed, Rust crate scaffolded at `recall/` with fluctlightdb from git — `cargo build` passes in 26s.
+
+## Reference implementation
+Four files attached. The algorithm is already validated — port it, don't redesign it.
+- `main.rs` — core: ingest, activate, agreement(), 7 passing tests
+- `checkpoints.json` — fixture shape
+- `grader_main.rs` — benchmark harness
+- `bench_840.json` — 840 labelled pairs from real entireio/cli commits
+
+Benchmark result to preserve: P 0.800, R 0.624, Spec 0.720, 339 µs/pair. Held-out split replicates (test R 0.612 vs train 0.609).
+
+## Architecture
+- **Go**: new cobra subcommand `recall`. Reads `entire/checkpoints/v1`, pipes JSON to the Rust binary, renders output. Under 200 lines, no logic.
+- **Rust** (`recall/`): two modes — `ingest` (checkpoints → engrams in `.entire/recall/brain/`, gitignored) and `activate` (question → ranked hits with verdict + backing commit).
+
+## Ingest mapping
+```
+user prompt      -> Episode, ProvenanceKind::UserExplicit,   salience 0.85
+assistant turn   -> Episode, ProvenanceKind::ChatAssertion,  salience 0.45
+commit msg + SHA -> Episode, ProvenanceKind::LedgerVerified, salience 0.90
+context string   -> "checkpoint:<id> commit:<sha> role:<role>"
+files changed    -> edges to file-node engrams
+```
+
+## Ranking — do NOT sort on raw activation
+1. provenance → `confidence::SourceKind`
+2. `agreement()` → Corroborated | Neutral | Contradicted
+3. Corroborated adds `Evidence(Verified)`; Contradicted adds `Evidence(Unknown, 0.15)` and ×0.45 on confidence
+4. `score = activation * confidence::activation_multiplier(confidence)`
+5. sort by score, dedupe identical content
+
+## agreement() checks, in order
+1. **scope** — claim asserts isolation + Graph reach escapes touched files → Contradicted
+2. **file** — claim names a path the commit never touched → Contradicted
+3. **polarity** — opposite action verb vs commit. **Word-boundary tokens only**: substring matching makes "wrapper" read as the verb "wrap" and silently zeroes the check. There's a regression test named for this. Infer commit polarity from feat/fix/revert prefix when the verb list finds nothing.
+4. **M1 identifier anchor** — message names a code-shaped token (camelCase, snake_case, dotted, `()`-suffixed) absent from diff vocab → Contradicted. This is the highest-value check: recall 0.517→0.624 with precision *up*, and it's the only mechanism that transfers across repos.
+5. **lexical** — ≥2 content terms shared with commit subject → Corroborated
+6. **n-gram** — 4-gram cosine vs diff+files > 0.10 → Corroborated
+
+Else Neutral. Do not add an IDF-anchor check — tested, it wrecks specificity (0.72→0.51).
+
+## Graph — required, not optional
+Replace the hardcoded `graph_impact()` stub with real `entire graph` output. Parse the impact surface into the file-edge map.
+
+## Output
+`--html` writes ONE static file: question, ranked cards showing tier (LEDGER/INTENT/chat), verdict badge, backing commit, activation path. No server, no framework, no CDN. **Only after the core works.**
+
+## Rules
+- Port the reference logic. Don't invent new ranking.
+- Keep the 7 tests passing; add tests for the Go shim.
+- Every commit carries a valid `Entire-Checkpoint` trailer.
+- Verify Graph conclusions against source before acting on them.
+
+## First task
+Write **checkpoint #1** as a real commit before any implementation: intended architecture, why FluctlightDB, what you expect to be hard, what might be wrong. Then port ingest + activate + agreement into `recall/`, wire the Go subcommand, prove one checkpoint round-trips end to end. **Stop and report before HTML.**
+
+---
+
+Then immediately after its first commit, run `git log -1` and `entire checkpoint list` yourself.'/home/voxmastery/Desktop/cli/grader_main.rs' '/home/voxmastery/Desktop/cli/main.rs' '/home/voxmastery/Desktop/cli/bench_840.json' '/home/voxmastery/Desktop/cli/checkpoints.json'
