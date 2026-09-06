@@ -1,0 +1,660 @@
+use fluctlightdb::brain::FluctlightBrain;
+use fluctlightdb::confidence::{activation_multiplier, recall_confidence, Evidence, SourceKind};
+use fluctlightdb::types::{Episode, Provenance, ProvenanceKind, RecallResult};
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Deserialize, Clone)]
+struct Turn { role: String, text: String }
+
+#[derive(Debug, Deserialize, Clone)]
+struct Checkpoint {
+    checkpoint_id: String,
+    commit_sha: String,
+    commit_message: String,
+    agent: String,
+    files: Vec<String>,
+    session: Vec<Turn>,
+    #[serde(default)]
+    diff: Vec<String>,
+}
+
+fn graph_impact() -> HashMap<&'static str, Vec<&'static str>> {
+    HashMap::from([
+        ("internal/dispatch/retry.go", vec!["internal/hooks/runner.go", "internal/telemetry/emit.go"]),
+        ("internal/dispatch/client.go", vec!["internal/dispatch/generate.go", "internal/hooks/runner.go"]),
+    ])
+}
+
+fn source_kind(p: &Option<Provenance>) -> SourceKind {
+    match p.as_ref().map(|x| x.kind.clone()) {
+        Some(ProvenanceKind::LedgerVerified) | Some(ProvenanceKind::ToolGrounded)
+        | Some(ProvenanceKind::FileObservation) => SourceKind::Verified,
+        Some(ProvenanceKind::UserExplicit) => SourceKind::UserStated,
+        _ => SourceKind::Unknown,
+    }
+}
+
+fn commit_of(ctx: &str) -> Option<String> {
+    ctx.split_whitespace().find_map(|t| t.strip_prefix("commit:").map(|s| s.to_string()))
+}
+
+
+
+/// Action polarity — a claim that ADDS while the commit REMOVES is refuted
+/// regardless of how many words they share.
+fn polarity(text: &str) -> i8 {
+    let t = text.to_lowercase();
+    // Word-boundary tokens only: substring matching made "wrapper" read as the
+    // verb "wrap", cancelling polarity to zero and silently disabling this check.
+    let toks: HashSet<&str> = t.split(|c: char| !c.is_alphanumeric()).collect();
+    let add = ["add","adding","added","introduce","introduced","create","created","enable","implement","implemented"];
+    let rem = ["remove","removing","removed","delete","deleted","drop","dropped","revert","reverted","disable","strip","stopped"];
+    let a = add.iter().filter(|w| toks.contains(*w)).count() as i8;
+    let r = rem.iter().filter(|w| toks.contains(*w)).count() as i8;
+    (a - r).signum()
+}
+
+/// MUTUAL RECALL — use the brain itself as the semantic judge instead of an
+/// embedding model. Cue the graph with the commit subject; if the claim engram
+/// comes back in the top-k, the two are associated in memory, not just in
+/// vocabulary. Catches paraphrase that lexical overlap misses.
+fn mutual_recall(brain: &FluctlightBrain, commit_sha_msg: &str, claim: &str, k: usize) -> Option<f32> {
+    let res = brain.activate_scoped(claim, None, None, k);
+    let want = format!("COMMIT {}", commit_sha_msg);
+    let best = res.recalls.iter().take(k).enumerate()
+        .find(|(_, r)| r.episode.content.starts_with(&want));
+    best.map(|(rank, r)| r.activation / (1.0 + rank as f32))
+}
+
+/// Three-way verdict of a claim against the commit it sits on.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Agree { Corroborated, Neutral, Contradicted }
+
+const STOP: &[&str] = &["the","a","an","and","or","to","of","in","is","it","this","that","we","you",
+    "for","on","with","not","be","are","was","so","at","as","its","into","from","by","must","now","their","own"];
+
+fn terms(s: &str) -> HashSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_')
+        .filter(|w| w.len() > 3 && !STOP.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// SEMANTIC AGREEMENT: does the claim actually match what the commit did?
+/// Corroboration is earned, not granted for merely sitting on a commit.
+thread_local! {
+    static JUDGE: std::cell::RefCell<Option<FluctlightBrain>> = std::cell::RefCell::new(None);
+}
+fn brain_judge(claim: &str, cp: &Checkpoint) -> Option<f32> {
+    JUDGE.with(|j| j.borrow().as_ref().and_then(|b| mutual_recall(b, &format!("{}:", cp.commit_sha), claim, 8)))
+}
+
+fn agreement(claim: &str, cp: &Checkpoint, g: &HashMap<&str, Vec<&str>>) -> (Agree, String) {
+    let low = claim.to_lowercase();
+
+    // 1. Scope contradiction: claim asserts isolation, Graph says the blast radius escapes.
+    let iso = ["isolated", "does not touch", "nothing else", "contained", "no other"];
+    if iso.iter().any(|w| low.contains(w)) {
+        let touched: HashSet<&str> = cp.files.iter().map(|s| s.as_str()).collect();
+        let reach: Vec<&str> = touched.iter()
+            .filter_map(|f| g.get(f))
+            .flatten()
+            .copied()
+            .filter(|d| !touched.contains(d))
+            .collect();
+        if !reach.is_empty() {
+            return (Agree::Contradicted,
+                format!("claims isolation; Graph reach escapes to {}", reach.len()));
+        }
+    }
+
+    // 2. File contradiction: claim names a path the commit never touched.
+    for t in terms(claim).iter().filter(|t| t.contains('/') || t.ends_with(".go")) {
+        if !cp.files.iter().any(|f| f.to_lowercase().contains(t.as_str())) {
+            return (Agree::Contradicted, format!("references {} which this commit did not touch", t));
+        }
+    }
+
+    // 3. Lexical agreement with what the commit says it did.
+    // 3. Polarity flip: same topic, opposite action.
+    let pc = polarity(claim);
+    // Conventional-commit prefixes carry polarity the verb list misses:
+    // "feat:"/"fix:" are additive, "revert:" is subtractive.
+    let mut pm = polarity(&cp.commit_message);
+    if pm == 0 {
+        let m = cp.commit_message.to_lowercase();
+        if m.starts_with("feat") || m.starts_with("fix") || m.starts_with("perf") { pm = 1; }
+        else if m.starts_with("revert") { pm = -1; }
+    }
+    if pc != 0 && pm != 0 && pc != pm {
+        let ct = terms(&cp.commit_message);
+        if terms(claim).intersection(&ct).count() >= 1 {
+            return (Agree::Contradicted, "action polarity opposes the commit".into());
+        }
+    }
+
+    // 4. Lexical agreement.
+    let ct = terms(&cp.commit_message);
+    let clt = terms(claim);
+    let shared = clt.intersection(&ct).count();
+    if shared >= 2 {
+        return (Agree::Corroborated, format!("{} terms match commit subject", shared));
+    }
+
+    // 5. Mutual recall — brain-as-judge for the paraphrase case.
+    if let Some(mr) = brain_judge(claim, cp) {
+        if mr > 0.5 {
+            return (Agree::Corroborated, format!("mutual recall {:.2} via memory graph", mr));
+        }
+    }
+    (Agree::Neutral, "no overlap with commit subject".into())
+}
+
+struct Ranked {
+    raw: f32, scored: f32, confidence: f32,
+    tier: &'static str, backed_by: Option<String>, text: String,
+    verdict: Agree, why: String,
+}
+
+fn rerank(recalls: &[RecallResult], cps: &[Checkpoint]) -> Vec<Ranked> {
+    let by_sha: HashMap<String, String> = cps.iter()
+        .map(|c| (c.commit_sha.clone(), format!("{} {}", c.commit_sha, c.commit_message)))
+        .collect();
+
+    let mut out: Vec<Ranked> = recalls.iter().map(|r| {
+        let kind = source_kind(&r.episode.provenance);
+        let mut ev = vec![Evidence::new(kind, 1.0)];
+        let sha = commit_of(&r.episode.context);
+        let backed_by = sha.as_ref().and_then(|k| by_sha.get(k).cloned());
+        let g = graph_impact();
+        let (verdict, why) = match sha.as_ref().and_then(|k| cps.iter().find(|c| &c.commit_sha == k)) {
+            Some(cp) if kind != SourceKind::Verified => agreement(&r.episode.content, cp, &g),
+            Some(_) => (Agree::Corroborated, "is the commit record".into()),
+            None => (Agree::Neutral, "no commit context".into()),
+        };
+        match verdict {
+            // Earned corroboration: an independent verified source.
+            Agree::Corroborated if kind != SourceKind::Verified => {
+                ev.push(Evidence::new(SourceKind::Verified, 1.0))
+            }
+            // Refuted by the ledger: the claim is evidence against itself.
+            Agree::Contradicted => ev.push(Evidence::new(SourceKind::Unknown, 0.15)),
+            _ => {}
+        }
+        let mut confidence = recall_confidence(&ev);
+        if verdict == Agree::Contradicted { confidence *= 0.45; }
+        let scored = r.activation * activation_multiplier(confidence);
+        let tier = match kind {
+            SourceKind::Verified => "LEDGER",
+            SourceKind::UserStated => "INTENT",
+            SourceKind::Inferred => "infer ",
+            SourceKind::Unknown => "chat  ",
+        };
+        let mut text = r.episode.content.replace('\n', " ");
+        text.truncate(70);
+        Ranked { raw: r.activation, scored, confidence, tier, backed_by, text, verdict, why }
+    }).collect();
+    out.sort_by(|a, b| b.scored.partial_cmp(&a.scored).unwrap());
+    let mut seen = HashSet::new();
+    out.retain(|r| seen.insert(r.text.clone()));
+    out
+}
+
+fn ingest(brain: &mut FluctlightBrain, cps: &[Checkpoint]) -> usize {
+    let mut n = 0;
+    for cp in cps {
+        let commit_ep = Episode {
+            content: format!("COMMIT {}: {}", cp.commit_sha, cp.commit_message),
+            context: format!("checkpoint:{} commit:{} files:{}", cp.checkpoint_id, cp.commit_sha, cp.files.join(",")),
+            outcome: Some(format!("touched {} files", cp.files.len())),
+            salience_hint: 0.9, semantic_vector: None,
+            agent_id: Some(cp.agent.clone()), tenant_id: None, rag: None,
+            provenance: Some(Provenance {
+                kind: ProvenanceKind::LedgerVerified,
+                source_uri: Some(format!("entire://checkpoint/{}", cp.checkpoint_id)),
+                confidence: 0.95, verified: true,
+            }),
+        };
+        brain.experience(commit_ep).expect("commit engram");
+        n += 1;
+        for t in &cp.session {
+            let is_user = t.role == "user";
+            let ep = Episode {
+                content: t.text.clone(),
+                context: format!("checkpoint:{} commit:{} role:{}", cp.checkpoint_id, cp.commit_sha, t.role),
+                outcome: None,
+                salience_hint: if is_user { 0.85 } else { 0.45 },
+                semantic_vector: None,
+                agent_id: Some(cp.agent.clone()), tenant_id: None, rag: None,
+                provenance: Some(Provenance {
+                    kind: if is_user { ProvenanceKind::UserExplicit } else { ProvenanceKind::ChatAssertion },
+                    source_uri: Some(format!("entire://checkpoint/{}", cp.checkpoint_id)),
+                    confidence: if is_user { 0.8 } else { 0.4 },
+                    verified: false,
+                }),
+            };
+            brain.experience(ep).expect("session engram");
+            n += 1;
+        }
+    }
+    n
+}
+
+fn detect_drift(cps: &[Checkpoint]) -> Vec<String> {
+    let g = graph_impact();
+    let mut findings = Vec::new();
+    let iso = ["isolated", "does not touch", "nothing else", "contained"];
+    for cp in cps {
+        if !cp.session.iter().any(|t| iso.iter().any(|w| t.text.to_lowercase().contains(w))) { continue; }
+        let touched: HashSet<&str> = cp.files.iter().map(|s| s.as_str()).collect();
+        let mut reach: HashSet<&str> = HashSet::new();
+        for f in &touched {
+            if let Some(deps) = g.get(f) {
+                for d in deps { if !touched.contains(d) { reach.insert(d); } }
+            }
+        }
+        if !reach.is_empty() {
+            let mut v: Vec<&str> = reach.into_iter().collect(); v.sort();
+            findings.push(format!("DRIFT  {}  session claimed isolation; Graph reaches {}", cp.commit_sha, v.join(", ")));
+        }
+    }
+    for (i, cp) in cps.iter().enumerate() {
+        for t in cp.session.iter().filter(|t| t.role == "user") {
+            for clause in t.text.split(&['.', ';'][..]) {
+                let c = clause.trim().to_lowercase();
+                if c.contains("also") && c.len() > 12 {
+                    let later = cps[i+1..].iter().any(|l| l.session.iter().any(|lt|
+                        c.split_whitespace().filter(|w| w.len() > 5).any(|w| lt.text.to_lowercase().contains(w))));
+                    if !later {
+                        findings.push(format!("OPEN   {}  requested but never revisited: \"{}\"", cp.commit_sha, clause.trim()));
+                    }
+                }
+            }
+        }
+    }
+    findings
+}
+
+
+
+// ══════════════ EXPERIMENTS: four strategies for the paraphrase gap ══════════════
+
+/// A. DIFF-GROUNDED VOCABULARY — compare the claim against the identifiers the
+/// code actually introduces, not the prose of the commit subject. Splits
+/// camelCase / snake_case so `maxAttempts` yields {max, attempts}.
+fn split_ident(w: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in w.split(|c: char| c == '_' || c == '.' || c == '/') {
+        let mut cur = String::new();
+        for ch in part.chars() {
+            if ch.is_uppercase() && !cur.is_empty() { out.push(cur.to_lowercase()); cur.clear(); }
+            if ch.is_alphanumeric() { cur.push(ch); }
+        }
+        if !cur.is_empty() { out.push(cur.to_lowercase()); }
+    }
+    out.into_iter().filter(|w| w.len() > 2).collect()
+}
+
+fn diff_vocab(cp: &Checkpoint) -> HashSet<String> {
+    let mut v = HashSet::new();
+    for line in &cp.diff {
+        for tok in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            for piece in split_ident(tok) {
+                if piece.len() > 3 && !STOP.contains(&piece.as_str()) { v.insert(piece); }
+            }
+        }
+    }
+    for f in &cp.files { for piece in split_ident(f) { if piece.len() > 3 { v.insert(piece); } } }
+    v
+}
+
+fn strat_diff(claim: &str, cp: &Checkpoint) -> Option<(f32, String)> {
+    let v = diff_vocab(cp);
+    let c = terms(claim);
+    let hits: Vec<&String> = c.iter().filter(|t| v.contains(*t)).collect();
+    if hits.len() >= 2 {
+        let mut names: Vec<&str> = hits.iter().map(|s| s.as_str()).collect();
+        names.sort();
+        Some((hits.len() as f32, format!("{} diff symbols: {}", hits.len(), names.join("/"))))
+    } else { None }
+}
+
+/// B. GRAPH SPREAD — relax mutual recall from top-k rank to a 2-hop reachability
+/// score, so weak-but-real association still counts.
+fn strat_spread(claim: &str, cp: &Checkpoint) -> Option<(f32, String)> {
+    JUDGE.with(|j| j.borrow().as_ref().and_then(|b| {
+        let res = b.activate_scoped(claim, None, None, 24);
+        let want = format!("COMMIT {}:", cp.commit_sha);
+        res.recalls.iter().enumerate()
+            .find(|(_, r)| r.episode.content.starts_with(&want))
+            .map(|(rank, r)| (r.activation / (1.0 + rank as f32 * 0.25),
+                              format!("graph spread rank {} act {:.2}", rank, r.activation)))
+            .filter(|(sc, _)| *sc > 0.35)
+    }))
+}
+
+/// C. DOMAIN LEXICON — hand-written synonym bridges.
+fn strat_lexicon(claim: &str, cp: &Checkpoint) -> Option<(f32, String)> {
+    const SYN: &[(&str, &[&str])] = &[
+        ("retry", &["reattempt", "attempts", "again", "resend"]),
+        ("guard", &["check", "handle", "prevent", "stopped", "crash"]),
+        ("empty", &["none", "no", "zero"]),
+        ("deadline", &["timeout", "budget", "expiry"]),
+        ("propagate", &["thread", "pass", "visible", "surface"]),
+        ("caller", &["callers", "whoever", "consumer"]),
+        ("backoff", &["backing", "delay", "wait"]),
+    ];
+    let c = terms(claim);
+    let ct = terms(&cp.commit_message);
+    let mut bridged = 0;
+    let mut how = Vec::new();
+    for (canon, syns) in SYN {
+        if ct.contains(*canon) && syns.iter().any(|s| c.contains(*s)) {
+            bridged += 1; how.push(*canon);
+        }
+    }
+    if bridged >= 2 { Some((bridged as f32, format!("lexicon bridge: {}", how.join("/")))) } else { None }
+}
+
+/// D. CHARACTER 4-GRAM COSINE — model-free vector similarity, no embedder.
+fn ngrams(s: &str) -> HashMap<String, f32> {
+    let t: String = s.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c==' ').collect();
+    let ch: Vec<char> = t.chars().collect();
+    let mut m: HashMap<String, f32> = HashMap::new();
+    for w in ch.windows(4) { *m.entry(w.iter().collect()).or_insert(0.0) += 1.0; }
+    m
+}
+fn cosine(a: &HashMap<String,f32>, b: &HashMap<String,f32>) -> f32 {
+    let dot: f32 = a.iter().filter_map(|(k,v)| b.get(k).map(|w| v*w)).sum();
+    let na: f32 = a.values().map(|v| v*v).sum::<f32>().sqrt();
+    let nb: f32 = b.values().map(|v| v*v).sum::<f32>().sqrt();
+    if na*nb == 0.0 { 0.0 } else { dot/(na*nb) }
+}
+fn strat_ngram(claim: &str, cp: &Checkpoint) -> Option<(f32, String)> {
+    let corpus = format!("{} {} {}", cp.commit_message, cp.files.join(" "), cp.diff.join(" "));
+    let sim = cosine(&ngrams(claim), &ngrams(&corpus));
+    if sim > 0.10 { Some((sim, format!("4-gram cosine {:.3}", sim))) } else { None }
+}
+
+// ─────────────────────────── EVAL HARNESS ───────────────────────────
+struct Case { claim: &'static str, sha: &'static str, truth: Agree, note: &'static str }
+
+fn eval_set() -> Vec<Case> {
+    use Agree::*;
+    vec![
+        // -- contradictions --
+        Case{claim:"Adding retry.go with a 3-attempt exponential backoff. This is contained within internal/dispatch and does not touch callers.", sha:"9f2c1ab", truth:Contradicted, note:"scope: graph escapes"},
+        Case{claim:"Removing the retry wrapper entirely from the dispatch client.", sha:"9f2c1ab", truth:Contradicted, note:"polarity flip"},
+        Case{claim:"Dropped the empty-repo guard from dispatch generation.", sha:"5c81f33", truth:Contradicted, note:"polarity flip"},
+        Case{claim:"Reverted the retry deadline propagation in the hook runner.", sha:"3ee7d90", truth:Contradicted, note:"polarity flip"},
+        Case{claim:"Edited internal/auth/token.go to fix the guard.", sha:"5c81f33", truth:Contradicted, note:"file never touched"},
+        Case{claim:"This change is isolated and nothing else in the tree is affected.", sha:"9f2c1ab", truth:Contradicted, note:"scope: graph escapes"},
+        // -- corroborated (literal) --
+        Case{claim:"Add a retry wrapper around the dispatch client with exponential backoff.", sha:"9f2c1ab", truth:Corroborated, note:"lexical"},
+        Case{claim:"Remove the retry wrapper; backoff belongs at the caller.", sha:"77b4102", truth:Corroborated, note:"lexical"},
+        Case{claim:"Guard dispatch generation against empty repositories.", sha:"5c81f33", truth:Corroborated, note:"lexical"},
+        Case{claim:"Propagate the retry deadline through the hook runner.", sha:"3ee7d90", truth:Corroborated, note:"lexical"},
+        // -- corroborated (paraphrase: the lexical-overlap blind spot) --
+        Case{claim:"Introduced automatic re-attempts when the send fails, backing off each time.", sha:"9f2c1ab", truth:Corroborated, note:"paraphrase"},
+        Case{claim:"Made the timeout budget visible to the hook execution layer.", sha:"3ee7d90", truth:Corroborated, note:"paraphrase"},
+        Case{claim:"Stopped the crash when a repository has no commits yet.", sha:"5c81f33", truth:Corroborated, note:"paraphrase"},
+        Case{claim:"Pushed backoff responsibility out to whoever calls us.", sha:"77b4102", truth:Corroborated, note:"paraphrase"},
+        // -- neutral --
+        Case{claim:"Ran the formatter across the package.", sha:"9f2c1ab", truth:Neutral, note:"unrelated"},
+        Case{claim:"Updated the changelog.", sha:"5c81f33", truth:Neutral, note:"unrelated"},
+    ]
+}
+
+fn score(name: &str, results: &[(Agree, Agree)]) {
+    // Contradiction is the decision that matters: precision/recall on that class.
+    let tp = results.iter().filter(|(p,t)| *p==Agree::Contradicted && *t==Agree::Contradicted).count() as f32;
+    let fp = results.iter().filter(|(p,t)| *p==Agree::Contradicted && *t!=Agree::Contradicted).count() as f32;
+    let fnn= results.iter().filter(|(p,t)| *p!=Agree::Contradicted && *t==Agree::Contradicted).count() as f32;
+    let acc = results.iter().filter(|(p,t)| p==t).count() as f32 / results.len() as f32;
+    let prec = if tp+fp>0.0 {tp/(tp+fp)} else {0.0};
+    let rec  = if tp+fnn>0.0 {tp/(tp+fnn)} else {0.0};
+    let f1   = if prec+rec>0.0 {2.0*prec*rec/(prec+rec)} else {0.0};
+    println!("   {:<22} acc {:.2}   contradiction P {:.2} R {:.2} F1 {:.2}", name, acc, prec, rec, f1);
+}
+
+/// Lexical-only baseline (v2 behaviour) for comparison.
+fn agreement_lexical(claim: &str, cp: &Checkpoint) -> Agree {
+    if terms(claim).intersection(&terms(&cp.commit_message)).count() >= 2 { Agree::Corroborated }
+    else { Agree::Neutral }
+}
+
+fn run_eval(cps: &[Checkpoint]) {
+    let g = graph_impact();
+    let cases = eval_set();
+    let find = |sha:&str| cps.iter().find(|c| c.commit_sha==sha).unwrap();
+
+    let lex: Vec<(Agree,Agree)> = cases.iter()
+        .map(|c| (agreement_lexical(c.claim, find(c.sha)), c.truth)).collect();
+    let fused: Vec<(Agree,Agree)> = cases.iter()
+        .map(|c| (agreement(c.claim, find(c.sha), &g).0, c.truth)).collect();
+
+    println!("── benchmark: {} labelled claim/commit pairs", cases.len());
+    score("lexical baseline", &lex);
+    score("fused (graph+pol+MR)", &fused);
+
+    println!("\n   misses:");
+    for (i,c) in cases.iter().enumerate() {
+        if fused[i].0 != c.truth {
+            println!("     [{}] got {:?} want {:?} — {} — \"{}\"",
+                c.sha, fused[i].0, c.truth, c.note,
+                &c.claim[..c.claim.len().min(56)]);
+        }
+    }
+
+    // latency
+    let t0 = std::time::Instant::now();
+    let iters = 200;
+    for _ in 0..iters { for c in &cases { let _ = agreement(c.claim, find(c.sha), &g); } }
+    let per = t0.elapsed().as_micros() as f64 / (iters*cases.len()) as f64;
+    println!("\n   latency: {:.1} µs per verdict ({} verdicts)", per, iters*cases.len());
+}
+
+
+/// Ablation: run each candidate strategy in place of step 5 and score it.
+fn ablation(cps: &[Checkpoint]) {
+    let g = graph_impact();
+    let cases = eval_set();
+    let find = |sha:&str| cps.iter().find(|c| c.commit_sha==sha).unwrap();
+
+    type Strat = (&'static str, fn(&str,&Checkpoint)->Option<(f32,String)>);
+    let strats: Vec<Strat> = vec![
+        ("A diff-grounded", strat_diff),
+        ("B graph spread",  strat_spread),
+        ("C domain lexicon",strat_lexicon),
+        ("D 4-gram cosine", strat_ngram),
+    ];
+
+    println!("── ablation: which strategy closes the paraphrase gap?\n");
+    println!("   {:<18} {:>5} {:>7} {:>7} {:>7} {:>9}", "strategy", "acc", "para", "contra-P", "contra-R", "µs/verdict");
+
+    // baseline: current fused pipeline, no step-5 rescue
+    let mut rows = Vec::new();
+    for (name, f) in std::iter::once(("— none (current)", none_strat as fn(&str,&Checkpoint)->Option<(f32,String)>)).chain(strats.into_iter()) {
+        let preds: Vec<(Agree,Agree)> = cases.iter().map(|c| {
+            let cp = find(c.sha);
+            let (mut v, _) = agreement(c.claim, cp, &g);
+            if v == Agree::Neutral { if f(c.claim, cp).is_some() { v = Agree::Corroborated; } }
+            (v, c.truth)
+        }).collect();
+        let acc = preds.iter().filter(|(p,t)| p==t).count() as f32 / preds.len() as f32;
+        let para: Vec<usize> = cases.iter().enumerate().filter(|(_,c)| c.note=="paraphrase").map(|(i,_)| i).collect();
+        let pacc = para.iter().filter(|i| preds[**i].0==preds[**i].1).count() as f32 / para.len() as f32;
+        let tp = preds.iter().filter(|(p,t)| *p==Agree::Contradicted && *t==Agree::Contradicted).count() as f32;
+        let fp = preds.iter().filter(|(p,t)| *p==Agree::Contradicted && *t!=Agree::Contradicted).count() as f32;
+        let fnn= preds.iter().filter(|(p,t)| *p!=Agree::Contradicted && *t==Agree::Contradicted).count() as f32;
+        let pr = if tp+fp>0.0 {tp/(tp+fp)} else {0.0};
+        let rc = if tp+fnn>0.0 {tp/(tp+fnn)} else {0.0};
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..100 { for c in &cases { let _ = f(c.claim, find(c.sha)); } }
+        let us = t0.elapsed().as_micros() as f64 / (100*cases.len()) as f64;
+
+        println!("   {:<18} {:>5.2} {:>6.0}% {:>8.2} {:>8.2} {:>9.1}", name, acc, pacc*100.0, pr, rc, us);
+        rows.push((name, acc, pacc));
+    }
+
+    println!("\n   paraphrase detail (A diff-grounded):");
+    for c in cases.iter().filter(|c| c.note=="paraphrase") {
+        let cp = find(c.sha);
+        match strat_diff(c.claim, cp) {
+            Some((_, why)) => println!("     ✓ {} — {}", &c.claim[..c.claim.len().min(46)], why),
+            None => println!("     ✗ {} — no diff-symbol overlap", &c.claim[..c.claim.len().min(46)]),
+        }
+    }
+}
+
+/// Is D's perfect score a plateau or a knife-edge? Sweep the threshold.
+fn sweep(cps: &[Checkpoint]) {
+    let g = graph_impact();
+    let cases = eval_set();
+    let find = |sha:&str| cps.iter().find(|c| c.commit_sha==sha).unwrap();
+    println!("\n── threshold sweep: D (4-gram cosine)");
+    println!("   {:>6} {:>6} {:>7} {:>26}", "thresh", "acc", "para", "note");
+    for t in [0.04f32,0.06,0.08,0.10,0.12,0.14,0.16,0.20,0.25] {
+        let preds: Vec<(Agree,Agree)> = cases.iter().map(|c| {
+            let cp = find(c.sha);
+            let (mut v,_) = agreement(c.claim, cp, &g);
+            if v == Agree::Neutral {
+                let corpus = format!("{} {} {}", cp.commit_message, cp.files.join(" "), cp.diff.join(" "));
+                if cosine(&ngrams(c.claim), &ngrams(&corpus)) > t { v = Agree::Corroborated; }
+            }
+            (v, c.truth)
+        }).collect();
+        let acc = preds.iter().filter(|(p,x)| p==x).count() as f32 / preds.len() as f32;
+        let para: Vec<usize> = cases.iter().enumerate().filter(|(_,c)| c.note=="paraphrase").map(|(i,_)| i).collect();
+        let pacc = para.iter().filter(|i| preds[**i].0==preds[**i].1).count() as f32/para.len() as f32;
+        let fp_neutral = cases.iter().enumerate()
+            .filter(|(i,c)| c.note=="unrelated" && preds[*i].0==Agree::Corroborated).count();
+        let note = if fp_neutral>0 { format!("{} unrelated wrongly corroborated", fp_neutral) } else { "clean".into() };
+        println!("   {:>6.2} {:>6.2} {:>6.0}% {:>26}", t, acc, pacc*100.0, note);
+    }
+
+    // A ∪ D
+    let preds: Vec<(Agree,Agree)> = cases.iter().map(|c| {
+        let cp = find(c.sha);
+        let (mut v,_) = agreement(c.claim, cp, &g);
+        if v == Agree::Neutral && (strat_diff(c.claim,cp).is_some() || strat_ngram(c.claim,cp).is_some()) {
+            v = Agree::Corroborated;
+        }
+        (v, c.truth)
+    }).collect();
+    let acc = preds.iter().filter(|(p,x)| p==x).count() as f32 / preds.len() as f32;
+    println!("\n   A ∪ D (diff OR ngram): acc {:.2}", acc);
+}
+
+fn none_strat(_c: &str, _p: &Checkpoint) -> Option<(f32,String)> { None }
+
+fn main() {
+    let raw = std::fs::read_to_string("fixtures/checkpoints.json").expect("fixture");
+    let cps: Vec<Checkpoint> = serde_json::from_str(&raw).expect("parse");
+    let dir = std::path::Path::new("/tmp/recall-brain-v2");
+    let _ = std::fs::remove_dir_all(dir);
+    let mut brain = FluctlightBrain::open(dir).expect("open brain");
+    let n = ingest(&mut brain, &cps);
+    brain.checkpoint().expect("checkpoint");
+    println!("ingested {} engrams from {} checkpoints\n", n, cps.len());
+    JUDGE.with(|j| *j.borrow_mut() = FluctlightBrain::open_readonly(dir).ok());
+
+    for cue in ["why did we drop the retry wrapper",
+                "what is unfinished in dispatch generation",
+                "was the retry wrapper change isolated to dispatch"] {
+        println!("── recall: {:?}", cue);
+        println!("   {:<8} {:>6} {:>8} {:>6}  content", "tier", "raw", "scored", "conf");
+        let res = brain.activate(cue);
+        for r in rerank(&res.recalls, &cps).iter().take(4) {
+            println!("   [{}] {:>6.3} {:>8.3} {:>6.2}  {}", r.tier, r.raw, r.scored, r.confidence, r.text);
+            let mark = match r.verdict {
+                Agree::Corroborated => "✓ corroborated",
+                Agree::Neutral      => "· unverified  ",
+                Agree::Contradicted => "✗ CONTRADICTED",
+            };
+            println!("            └─ {} — {}", mark, r.why);
+            if let Some(b) = &r.backed_by { println!("               commit {}", b); }
+        }
+        println!();
+    }
+
+    run_eval(&cps);
+    println!();
+    ablation(&cps);
+    sweep(&cps);
+    println!();
+    println!("── fusion findings (session intent × Graph structure)");
+    for f in detect_drift(&cps) { println!("   {}", f); }
+    drop(brain);
+    let reopened = FluctlightBrain::open_readonly(dir).expect("reopen");
+    println!("\n── durability: reopened, recall returned {} hits", reopened.activate("retry wrapper").recalls.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cps() -> Vec<Checkpoint> {
+        serde_json::from_str(&std::fs::read_to_string("fixtures/checkpoints.json").unwrap()).unwrap()
+    }
+    fn cp(sha: &str) -> Checkpoint { cps().into_iter().find(|c| c.commit_sha == sha).unwrap() }
+
+    #[test]
+    fn wrapper_does_not_read_as_the_verb_wrap() {
+        // regression: substring matching cancelled polarity to zero
+        assert_eq!(polarity("Removing the retry wrapper entirely"), -1);
+        assert_eq!(polarity("Add a retry wrapper"), 1);
+    }
+
+    #[test]
+    fn isolation_claim_refuted_by_graph_reach() {
+        let g = graph_impact();
+        let (v, _) = agreement(
+            "This is contained within internal/dispatch and does not touch callers.",
+            &cp("9f2c1ab"), &g);
+        assert_eq!(v, Agree::Contradicted);
+    }
+
+    #[test]
+    fn polarity_flip_against_conventional_commit() {
+        let g = graph_impact();
+        let (v, _) = agreement("Dropped the empty-repo guard from dispatch generation.", &cp("5c81f33"), &g);
+        assert_eq!(v, Agree::Contradicted);
+    }
+
+    #[test]
+    fn untouched_file_is_contradiction() {
+        let g = graph_impact();
+        let (v, _) = agreement("Edited internal/auth/token.go to fix the guard.", &cp("5c81f33"), &g);
+        assert_eq!(v, Agree::Contradicted);
+    }
+
+    #[test]
+    fn agreeing_claim_is_corroborated() {
+        let g = graph_impact();
+        let (v, _) = agreement("Guard dispatch generation against empty repositories.", &cp("5c81f33"), &g);
+        assert_eq!(v, Agree::Corroborated);
+    }
+
+    #[test]
+    fn contradiction_collapses_confidence_below_corroborated() {
+        let ok  = recall_confidence(&[Evidence::new(SourceKind::UserStated,1.0), Evidence::new(SourceKind::Verified,1.0)]);
+        let bad = recall_confidence(&[Evidence::new(SourceKind::UserStated,1.0), Evidence::new(SourceKind::Unknown,0.15)]) * 0.45;
+        assert!(bad < ok, "contradicted {bad} must rank under corroborated {ok}");
+    }
+
+    #[test]
+    fn brain_survives_reopen() {
+        let dir = std::path::Path::new("/tmp/recall-test-brain");
+        let _ = std::fs::remove_dir_all(dir);
+        let mut b = FluctlightBrain::open(dir).unwrap();
+        ingest(&mut b, &cps());
+        b.checkpoint().unwrap();
+        drop(b);
+        let r = FluctlightBrain::open_readonly(dir).unwrap();
+        assert!(!r.activate("retry wrapper").recalls.is_empty());
+    }
+}
