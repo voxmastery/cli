@@ -1,0 +1,93 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1TPAM56B1NC55QP3SGN5MGK",
+  "session_id": "1108ead7-3219-47e6-aebb-9e25067f3f27",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-06T06:26:11.298807394Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "recall/src/agreement.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-fable-5-1",
+  "turn_id": "7a04cdb01bb0",
+  "checkpoint_transcript_start": 1936,
+  "transcript_lines_at_start": 1936,
+  "compact_transcript_start": 52,
+  "token_usage": {
+    "input_tokens": 390,
+    "cache_creation_tokens": 28628,
+    "cache_read_tokens": 5377755,
+    "output_tokens": 17421,
+    "api_call_count": 15
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_017CxKYbyAzxGRCfAxpsjVh4",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "superpowers:test-driven-development"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "56b4cfcba17d",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 36,
+        "end": 37,
+        "entry_ids": [
+          "c38816fa-6222-4130-90e1-c9a2730d4c17"
+        ],
+        "tool_use_id": "toolu_017CxKYbyAzxGRCfAxpsjVh4"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_017CxKYbyAzxGRCfAxpsjVh4"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: superpowers:test-driven-development",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-06T06:26:11.122519964Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 40,
+    "total_committed": 0,
+    "total_lines_changed": 77,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 235,
+      "user_lines_removed": 40,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "recall/README.md": 55,
+        "recall/src/agreement.rs": 21,
+        "recall/src/graph.rs": 107,
+        "recall/tests/port.rs": 52
+      },
+      "user_removed_per_file": {
+        "recall/src/agreement.rs": 3,
+        "recall/src/graph.rs": 37
+      }
+    }
+  ]
+}

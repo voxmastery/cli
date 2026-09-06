@@ -1,0 +1,43 @@
+Paste this now, before noon:
+
+---
+
+Three fixes before the curveball. Do not start new features. Commit when done — this stays part of the pre-noon stable state.
+
+**1. URL guard in the file-contradiction check (highest priority).**
+The file check in `agreement()` treats URL path segments as file paths, so a claim containing a link gets flagged CONTRADICTED against a commit that never touched that "path". This is producing a wrong top hit on real transcripts.
+
+Fix: before the file-path check runs, skip any token that is part of a URL — matches `http://`, `https://`, `www.`, or sits inside a token containing `://`. Also skip tokens with a TLD-looking suffix (`.com`, `.io`, `.dev`, `.org`). Add a test using the actual case that failed: a user turn containing a docs URL, against a commit that touched unrelated files → must not be CONTRADICTED.
+
+**2. Diagnose graph_edges: 0.**
+Both checkpoints ingested with zero graph edges. Hypothesis in the report: the first `+` line of a new file lands on a package or import line with no enclosing symbol, so no symbol resolves.
+
+Verify that hypothesis directly — print what symbol resolution is attempted and what comes back for one known commit. Then, if confirmed, fall back to **file-level** edges: instead of resolving a symbol from the diff line, take the changed file paths and run `entire graph impact` against symbols defined in those files, or use related-files output. Any non-zero, verifiable edge set beats an empty one. If you cannot get real edges in 20 minutes, say so and stop — do not fabricate edges.
+
+**3. Cache warming for the demo.**
+Ingest took 1m44s because moving HEAD invalidates the graph cache and `--head` re-indexes at ~90s. Add a documented pre-warm step (`entire graph index`) and make ingest reuse a warm cache where possible. At minimum, document in the README that the cache must be warmed before demoing and that HEAD must not move during a demo.
+
+**Do not:**
+- Fold the grader's `predict()` signals into `agreement()`. Current P 0.865 / Spec 0.923 is better than the grader pipeline on both; we are keeping the precision-biased profile deliberately.
+- Start the HTML view.
+- Refactor the Go shim for line count.
+
+When done: run the full test suite, commit with a clear message, confirm the `Entire-Checkpoint` trailer, and report what changed on graph edges specifically.
+
+---
+
+After it commits, verify the trailer yourself and be ready to close the session cleanly at noon.
+
+---
+
+continue
+
+---
+
+<task-notification>
+<task-id>bcqu547rm</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/tmp/claude-1000/-home-voxmastery-Desktop-cli/1108ead7-3219-47e6-aebb-9e25067f3f27/tasks/bcqu547rm.output</output-file>
+<status>completed</status>
+<summary>Background command "Run the full cli Go test package" completed (exit code 0)</summary>
+</task-notification>
