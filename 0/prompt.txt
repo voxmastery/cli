@@ -1,0 +1,9 @@
+did you check all the benchmark testing?
+
+---
+
+Correct the Evaluation table latency to ~145 µs per verdict (measured 139–148 µs across runs today, 144 µs at final HEAD). Amend with the same trailer.
+
+---
+
+In the cross-repository table's intro sentence, add: "generated with the same harness in a separate working directory; only the 840-pair set ships in this repository."
