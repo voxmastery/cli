@@ -33,11 +33,26 @@ type recallCheckpoint struct {
 	Files         []string     `json:"files"`
 	Session       []recallTurn `json:"session"`
 	Diff          []string     `json:"diff"`
+	// Unavailable names the fields this shim could not provide: redacted,
+	// withheld by --no-transcripts, or unreadable. The Rust side treats a
+	// check that needs one of them as unverifiable rather than running it on
+	// an empty field. Declared here, never inferred there.
+	Unavailable []string `json:"unavailable,omitempty"`
 }
+
+// Field names shared with recall/src/model.rs.
+const (
+	recallFieldSession = "session"
+	recallFieldDiff    = "diff"
+	recallFieldFiles   = "files"
+)
 
 type recallIngestInput struct {
 	RepoRoot    string             `json:"repo_root"`
 	Checkpoints []recallCheckpoint `json:"checkpoints"`
+	// Truncated is set when the commit walk hit recallMaxCommits: older
+	// checkpoints exist on the branch and were never examined.
+	Truncated bool `json:"truncated"`
 }
 
 // recallCommit is a commit on the branch that carries an Entire-Checkpoint trailer.
@@ -54,8 +69,12 @@ const (
 )
 
 // collectRecallCheckpoints walks HEAD's first-parent history for trailered
-// commits and reads each one's checkpoint into the wire shape.
-func collectRecallCheckpoints(ctx context.Context, errW io.Writer, root string) (*recallIngestInput, error) {
+// commits and reads each one's checkpoint into the wire shape. A commit whose
+// checkpoint cannot be read is never dropped: its ledger record (sha, subject,
+// files and diff from git) is still ingested, with the transcript declared
+// unavailable. With noTranscripts every checkpoint is treated that way and the
+// transcript is never opened.
+func collectRecallCheckpoints(ctx context.Context, errW io.Writer, root string, noTranscripts bool) (*recallIngestInput, error) {
 	lookup, err := newExplainCheckpointLookup(ctx)
 	if err != nil {
 		return nil, err
@@ -76,6 +95,7 @@ func collectRecallCheckpoints(ctx context.Context, errW io.Writer, root string) 
 	seen := 0
 	err = iter.ForEach(func(c *object.Commit) error {
 		if seen >= recallMaxCommits {
+			input.Truncated = true
 			return errRecallWalkDone
 		}
 		seen++
@@ -84,14 +104,7 @@ func collectRecallCheckpoints(ctx context.Context, errW io.Writer, root string) 
 			return nil
 		}
 		diff, diffErr := recallCommitDiff(ctx, root, c.Hash.String())
-		if diffErr != nil {
-			fmt.Fprintf(errW, "recall: diff for %s: %v\n", c.Hash.String()[:7], diffErr)
-		}
-		cp, cpErr := recallCheckpointFromReader(ctx, lookup.store, recallCommit{SHA: c.Hash.String()[:7], Message: c.Message, CheckpointID: cpID}, diff)
-		if cpErr != nil {
-			fmt.Fprintf(errW, "recall: skipping %s: %v\n", cpID, cpErr)
-			return nil
-		}
+		cp := recallCheckpointFromReader(ctx, errW, lookup.store, recallCommit{SHA: c.Hash.String()[:7], Message: c.Message, CheckpointID: cpID}, diff, diffErr, noTranscripts)
 		input.Checkpoints = append(input.Checkpoints, *cp)
 		return nil
 	})
@@ -109,38 +122,96 @@ type recallReader interface {
 	ReadSessionContent(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.SessionContent, error)
 }
 
-// recallCheckpointFromReader reads the checkpoint summary and its latest
-// session, and condenses the transcript into user/assistant turns.
-func recallCheckpointFromReader(ctx context.Context, reader recallReader, commit recallCommit, diff []string) (*recallCheckpoint, error) {
-	summary, err := reader.Read(ctx, commit.CheckpointID)
-	if err != nil {
-		return nil, fmt.Errorf("read checkpoint: %w", err)
-	}
-	if summary == nil || len(summary.Sessions) == 0 {
-		return nil, checkpoint.ErrCheckpointNotFound
-	}
-	content, err := reader.ReadSessionContent(ctx, commit.CheckpointID, len(summary.Sessions)-1)
-	if err != nil {
-		return nil, fmt.Errorf("read session: %w", err)
-	}
-	files := summary.FilesTouched
-	if len(files) == 0 {
-		files = content.Metadata.FilesTouched
-	}
-	var turns []recallTurn
-	if entries, condErr := summarize.BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted(content.Transcript), content.Metadata.Agent); condErr == nil {
-		turns = recallTurnsFromEntries(entries, recallMaxAssistantRunes)
-	}
+// recallCheckpointFromReader builds the wire checkpoint for one trailered
+// commit. It never fails: what git knows (sha, subject, diff, files) is always
+// a ledger record, and every field the store could not supply is declared in
+// Unavailable so the ranking side says "unverifiable" instead of judging a
+// claim against emptiness. Reasons go to errW; they are operational, not
+// content.
+func recallCheckpointFromReader(ctx context.Context, errW io.Writer, reader recallReader, commit recallCommit, diff []string, diffErr error, noTranscripts bool) *recallCheckpoint {
 	subject, _, _ := strings.Cut(strings.TrimSpace(commit.Message), "\n")
-	return &recallCheckpoint{
+	cp := &recallCheckpoint{
 		CheckpointID:  commit.CheckpointID.String(),
 		CommitSHA:     commit.SHA,
 		CommitMessage: subject,
-		Agent:         string(content.Metadata.Agent),
-		Files:         files,
-		Session:       turns,
 		Diff:          diff,
-	}, nil
+	}
+	if diffErr != nil {
+		fmt.Fprintf(errW, "recall: %s: diff unavailable (%v)\n", commit.SHA, diffErr)
+		cp.Diff = nil
+		cp.Unavailable = append(cp.Unavailable, recallFieldDiff)
+	}
+
+	summary, err := reader.Read(ctx, commit.CheckpointID)
+	if err == nil && (summary == nil || len(summary.Sessions) == 0) {
+		err = checkpoint.ErrCheckpointNotFound
+	}
+	var content *checkpoint.SessionContent
+	switch {
+	case err != nil:
+		fmt.Fprintf(errW, "recall: %s: transcript unavailable (%v); ingesting ledger record only\n", commit.CheckpointID, err)
+	case noTranscripts:
+		// Deliberately never opened: the privacy boundary is that the
+		// transcript is not read, not that it is read and discarded.
+	default:
+		content, err = reader.ReadSessionContent(ctx, commit.CheckpointID, len(summary.Sessions)-1)
+		if err != nil {
+			fmt.Fprintf(errW, "recall: %s: transcript unavailable (%v); ingesting ledger record only\n", commit.CheckpointID, err)
+			content = nil
+		}
+	}
+
+	var files []string
+	if summary != nil {
+		files = summary.FilesTouched
+	}
+	if len(files) == 0 && content != nil {
+		files = content.Metadata.FilesTouched
+	}
+	if len(files) == 0 {
+		files = recallFilesFromDiff(diff)
+	}
+	if len(files) == 0 {
+		cp.Unavailable = append(cp.Unavailable, recallFieldFiles)
+	}
+	cp.Files = files
+
+	if content != nil {
+		cp.Agent = string(content.Metadata.Agent)
+		if entries, condErr := summarize.BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted(content.Transcript), content.Metadata.Agent); condErr == nil {
+			cp.Session = recallTurnsFromEntries(entries, recallMaxAssistantRunes)
+		}
+	} else {
+		cp.Unavailable = append(cp.Unavailable, recallFieldSession)
+	}
+	// Sequences on the wire are arrays, never null: a nil slice would marshal
+	// as null and the Rust side rejects null for a sequence.
+	if cp.Files == nil {
+		cp.Files = []string{}
+	}
+	if cp.Session == nil {
+		cp.Session = []recallTurn{}
+	}
+	if cp.Diff == nil {
+		cp.Diff = []string{}
+	}
+	return cp
+}
+
+// recallFilesFromDiff recovers the touched paths from the `+++ b/` headers
+// that recallDiffLines keeps, for a checkpoint whose store entry is unreadable.
+func recallFilesFromDiff(diff []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range diff {
+		path, ok := strings.CutPrefix(line, "+++ b/")
+		if !ok || path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
 }
 
 // recallTurnsFromEntries keeps user and assistant text, collapses whitespace,

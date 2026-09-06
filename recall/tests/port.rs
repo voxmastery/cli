@@ -227,3 +227,248 @@ fn symbol_lines_come_from_symbols_stream_for_touched_files_only() {
         "two code symbols per touched file, in line order; headings and untouched files are skipped"
     );
 }
+
+// ── privacy boundary: redacted or unavailable checkpoint fields ──────────
+
+use recall::model::{Coverage, IngestInput, Skipped};
+use recall::rank::{PARTIAL_CONFIDENCE_CAP, rerank};
+
+/// A checkpoint whose diff was withheld: the shim declares it, the field is empty.
+fn cp_without_diff(sha: &str) -> Checkpoint {
+    let mut c = cp(sha);
+    c.diff.clear();
+    c.unavailable = vec!["diff".into()];
+    c
+}
+
+fn recall_of(
+    content: &str,
+    kind: &str,
+    sha: &str,
+    activation: f32,
+) -> fluctlightdb::types::RecallResult {
+    serde_json::from_value(serde_json::json!({
+        "engram_id": "00000000-0000-0000-0000-000000000001",
+        "activation": activation,
+        "completion_strength": 1.0,
+        "episode": {
+            "content": content,
+            "context": format!("checkpoint:x commit:{sha} role:assistant"),
+            "outcome": null,
+            "salience_hint": 0.5,
+            "semantic_vector": null,
+            "agent_id": "t",
+            "tenant_id": null,
+            "rag": null,
+            "provenance": {"kind": kind, "source_uri": null, "confidence": 0.5, "verified": false}
+        }
+    }))
+    .expect("recall result literal")
+}
+
+#[test]
+fn missing_diff_makes_identifier_check_unverifiable_not_contradicted() {
+    // Same claim as identifier_absent_from_diff_is_contradiction, but the diff
+    // is unavailable: absence of evidence is not evidence of a lie.
+    let (v, why) = agreement(
+        "Added the guard in generate.go via checkEmptyRepo() and setMaxRetries.",
+        &cp_without_diff("5c81f33"),
+        &fixture_graph(),
+    );
+    assert_eq!(v, Agree::Unverifiable, "{why}");
+    assert!(
+        why.contains("diff"),
+        "the reason names the missing field: {why}"
+    );
+}
+
+#[test]
+fn isolation_claim_with_graph_unavailable_is_unverifiable() {
+    let (v, why) = agreement(
+        "This is contained within internal/dispatch and does not touch callers.",
+        &cp("9f2c1ab"),
+        &GraphReach::unavailable(),
+    );
+    assert_eq!(v, Agree::Unverifiable, "{why}");
+    assert!(why.contains("graph"), "{why}");
+}
+
+#[test]
+fn empty_graph_is_not_unavailable_graph() {
+    // Bench parity: GraphReach::default() is "no edges", not "no graph". The
+    // isolation claim falls through to the later checks exactly as before.
+    let (v, why) = agreement(
+        "This is contained within internal/dispatch and does not touch callers.",
+        &cp("9f2c1ab"),
+        &GraphReach::default(),
+    );
+    assert_ne!(v, Agree::Unverifiable, "{why}");
+}
+
+#[test]
+fn unavailable_files_make_a_path_claim_unverifiable() {
+    let mut c = cp("5c81f33");
+    c.files.clear();
+    c.unavailable = vec!["files".into()];
+    let (v, why) = agreement(
+        "Edited internal/auth/token.go to fix the guard.",
+        &c,
+        &fixture_graph(),
+    );
+    assert_eq!(v, Agree::Unverifiable, "{why}");
+    assert!(why.contains("files"), "{why}");
+}
+
+#[test]
+fn nothing_fires_on_a_partial_checkpoint_is_unverifiable_not_neutral() {
+    // Neutral means "checked, found nothing". With the diff missing the
+    // n-gram check never ran, so the honest answer is Unverifiable.
+    let (v, why) = agreement(
+        "Ran the formatter across the package.",
+        &cp_without_diff("9f2c1ab"),
+        &fixture_graph(),
+    );
+    assert_eq!(v, Agree::Unverifiable, "{why}");
+}
+
+#[test]
+fn unverifiable_serialises_as_its_own_word() {
+    assert_eq!(
+        serde_json::to_string(&Agree::Unverifiable).unwrap(),
+        "\"unverifiable\""
+    );
+}
+
+#[test]
+fn partial_checkpoint_caps_confidence_and_names_the_missing_field() {
+    let mut partial = cp_without_diff("5c81f33");
+    partial.commit_sha = "part001".into();
+    let cps = vec![cp("5c81f33"), partial];
+    let claim = "Guard dispatch generation against empty repositories.";
+    let ranked = rerank(
+        &[
+            recall_of(claim, "chat_assertion", "part001", 1.0),
+            recall_of(&format!("{claim} Done."), "chat_assertion", "5c81f33", 1.0),
+        ],
+        &cps,
+        &fixture_graph(),
+    );
+    let complete = ranked
+        .iter()
+        .find(|r| r.commit.as_deref() == Some("5c81f33"))
+        .unwrap();
+    let capped = ranked
+        .iter()
+        .find(|r| r.commit.as_deref() == Some("part001"))
+        .unwrap();
+    assert_eq!(complete.verdict, Agree::Corroborated);
+    assert!(complete.partial.is_empty());
+    assert!(complete.confidence > PARTIAL_CONFIDENCE_CAP);
+    assert_eq!(capped.verdict, Agree::Corroborated, "{}", capped.why);
+    assert_eq!(capped.partial, vec!["diff".to_string()]);
+    assert!(
+        capped.confidence <= PARTIAL_CONFIDENCE_CAP,
+        "{}",
+        capped.confidence
+    );
+    assert_eq!(
+        ranked[0].commit.as_deref(),
+        Some("5c81f33"),
+        "the complete hit ranks first"
+    );
+}
+
+#[test]
+fn ledger_hit_on_partial_checkpoint_keeps_confidence_but_carries_marker() {
+    let mut partial = cp("9f2c1ab");
+    partial.session.clear();
+    partial.unavailable = vec!["session".into()];
+    let ranked = rerank(
+        &[recall_of(
+            "COMMIT 9f2c1ab: feat: add retry wrapper",
+            "ledger_verified",
+            "9f2c1ab",
+            1.0,
+        )],
+        &[partial],
+        &fixture_graph(),
+    );
+    assert_eq!(ranked[0].tier, "LEDGER");
+    assert!(
+        ranked[0].confidence > PARTIAL_CONFIDENCE_CAP,
+        "the commit record is itself complete"
+    );
+    assert_eq!(ranked[0].partial, vec!["session".to_string()]);
+}
+
+#[test]
+fn redacted_marker_in_claim_marks_partial_without_changing_verdict() {
+    let claim = "Guard dispatch generation against empty repositories; the key was REDACTED.";
+    let (v, _) = agreement(claim, &cp("5c81f33"), &fixture_graph());
+    let ranked = rerank(
+        &[recall_of(claim, "chat_assertion", "5c81f33", 1.0)],
+        &cps(),
+        &fixture_graph(),
+    );
+    assert_eq!(ranked[0].verdict, v, "the marker never routes the verdict");
+    assert_eq!(ranked[0].partial, vec!["claim redacted".to_string()]);
+    assert!(ranked[0].confidence <= PARTIAL_CONFIDENCE_CAP);
+}
+
+#[test]
+fn units_commit_types_and_absolute_paths_are_not_repo_paths() {
+    // The three false contradictions from the morning transcript.
+    let (v, why) = agreement(
+        "Preserve 139 µs/pair. Infer polarity from feat/fix/revert. Reference: /home/me/Desktop/cli/grader_main.rs",
+        &cp("5c81f33"),
+        &fixture_graph(),
+    );
+    assert_ne!(v, Agree::Contradicted, "{why}");
+}
+
+#[test]
+fn coverage_counts_complete_partial_skipped_and_truncation() {
+    let mut partial = cp("9f2c1ab");
+    partial.unavailable = vec!["session".into()];
+    let input = IngestInput {
+        repo_root: String::new(),
+        checkpoints: vec![cp("5c81f33"), cp("3ee7d90"), partial],
+        skipped: vec![
+            Skipped {
+                checkpoint_id: "01A".into(),
+                reason: "fetch failed".into(),
+            },
+            Skipped {
+                checkpoint_id: "01B".into(),
+                reason: "fetch failed".into(),
+            },
+        ],
+        truncated: true,
+    };
+    let c = Coverage::from_input(&input, false);
+    assert_eq!((c.complete, c.partial, c.skipped, c.total), (2, 1, 2, 5));
+    assert!(!c.graph_available);
+    assert!(c.truncated);
+    assert!(!c.is_complete());
+    let full = Coverage::from_input(
+        &IngestInput {
+            checkpoints: cps(),
+            ..Default::default()
+        },
+        true,
+    );
+    assert!(full.is_complete());
+}
+
+#[test]
+fn null_session_files_and_diff_deserialise_as_empty() {
+    // The Go shim's nil slices arrive as JSON null; a ledger-only checkpoint
+    // must still parse.
+    let cp: Checkpoint = serde_json::from_str(
+        r#"{"checkpoint_id":"x","commit_sha":"abc","commit_message":"feat: x","agent":"",
+            "files":null,"session":null,"diff":null,"unavailable":["session"]}"#,
+    )
+    .expect("null sequences parse as empty");
+    assert!(cp.files.is_empty() && cp.session.is_empty() && cp.diff.is_empty());
+    assert!(cp.lacks("session"));
+}

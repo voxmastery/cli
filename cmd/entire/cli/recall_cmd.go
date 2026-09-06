@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -34,6 +36,55 @@ type recallHit struct {
 	Commit     *string `json:"commit"`
 	Text       string  `json:"text"`
 	Context    string  `json:"context"`
+	// Partial names what was missing when this hit was judged (checkpoint
+	// fields the shim declared unavailable, or "claim redacted"). Empty means
+	// the hit was drawn from complete context.
+	Partial []string `json:"partial"`
+}
+
+// recallCoverage is what the brain was built from, as recorded at ingest and
+// returned with every answer. Anything short of complete is rendered PARTIAL.
+type recallCoverage struct {
+	Total          int            `json:"total"`
+	Complete       int            `json:"complete"`
+	Partial        int            `json:"partial"`
+	Skipped        int            `json:"skipped"`
+	Truncated      bool           `json:"truncated"`
+	GraphAvailable bool           `json:"graph_available"`
+	Unavailable    map[string]int `json:"unavailable"`
+}
+
+func (c recallCoverage) isComplete() bool {
+	return c.Partial == 0 && c.Skipped == 0 && !c.Truncated && c.GraphAvailable
+}
+
+// recallOutput is the activate envelope emitted by the Rust binary.
+type recallOutput struct {
+	Coverage recallCoverage `json:"coverage"`
+	Hits     []recallHit    `json:"hits"`
+}
+
+// recallIngestReport is the ingest report emitted by the Rust binary.
+type recallIngestReport struct {
+	Checkpoints int            `json:"checkpoints"`
+	Engrams     int            `json:"engrams"`
+	GraphEdges  int            `json:"graph_edges"`
+	Coverage    recallCoverage `json:"coverage"`
+}
+
+// recallFieldWords renders wire field names for a human.
+var recallFieldWords = map[string]string{
+	"session":        "transcript",
+	"diff":           "diff",
+	"files":          "file list",
+	"commit_message": "commit message",
+}
+
+func recallFieldWord(f string) string {
+	if w, ok := recallFieldWords[f]; ok {
+		return w
+	}
+	return f
 }
 
 func newRecallCmd() *cobra.Command {
@@ -48,8 +99,13 @@ func newRecallCmd() *cobra.Command {
 		Long: `Recall turns this branch's checkpoint history into associative memory and
 answers a question with ranked, trust-scored hits: each carries a tier
 (LEDGER = commit record, INTENT = user prompt, chat = assistant claim), a
-verdict of the claim against the commit it sits on (corroborated,
-unverified, or CONTRADICTED), and the backing commit.
+verdict of the claim against the commit it sits on (corroborated, neutral,
+CONTRADICTED, or UNVERIFIABLE when the field a check needed was redacted or
+unavailable), and the backing commit.
+
+Every answer opens with a context line. "complete" means every checkpoint
+seen was indexed whole; "PARTIAL" says what was missing. Hits judged from
+partial context are marked and their confidence is capped.
 
 Run 'entire recall ingest' first to build the memory under .entire/recall.`,
 		Example: "  entire recall ingest\n  entire recall why did we drop the retry wrapper\n  entire recall --json what is unfinished in dispatch",
@@ -61,30 +117,36 @@ Run 'entire recall ingest' first to build the memory under .entire/recall.`,
 	cmd.Flags().IntVar(&k, "k", 8, "Number of memories to return")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Emit the ranked hits as JSON")
 
-	var noGraph bool
+	var noGraph, noTranscripts bool
 	ingest := &cobra.Command{
 		Use:   "ingest",
 		Short: "Build recall memory from this branch's checkpoints",
 		Long: `Walks the commits on the current branch that carry an Entire-Checkpoint
 trailer, reads each checkpoint's transcript and diff, asks the code graph for
 each changed file's blast radius, and writes the memory to .entire/recall.
-The directory is derived state and is rebuilt from scratch on every run.`,
+The directory is derived state and is rebuilt from scratch on every run.
+
+Nothing leaves the machine: the memory is an embedded database under
+.entire/recall and the only network traffic is git fetching the repository's
+own checkpoint refs. A checkpoint whose transcript cannot be read is still
+ingested as a ledger record, marked partial.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRecallIngest(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), noGraph)
+			return runRecallIngest(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), noGraph, noTranscripts)
 		},
 	}
-	ingest.Flags().BoolVar(&noGraph, "no-graph", false, "Skip 'entire graph impact' (faster; disables the isolation check)")
+	ingest.Flags().BoolVar(&noGraph, "no-graph", false, "Skip 'entire graph impact' (faster; isolation claims become unverifiable)")
+	ingest.Flags().BoolVar(&noTranscripts, "no-transcripts", false, "Never open a transcript: ingest commit records only, every checkpoint marked partial")
 	cmd.AddCommand(ingest)
 	return cmd
 }
 
-func runRecallIngest(ctx context.Context, w, errW io.Writer, noGraph bool) error {
+func runRecallIngest(ctx context.Context, w, errW io.Writer, noGraph, noTranscripts bool) error {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return fmt.Errorf("not a git repository: %w", err)
 	}
-	input, err := collectRecallCheckpoints(ctx, errW, root)
+	input, err := collectRecallCheckpoints(ctx, errW, root, noTranscripts)
 	if err != nil {
 		return err
 	}
@@ -104,7 +166,12 @@ func runRecallIngest(ctx context.Context, w, errW io.Writer, noGraph bool) error
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "Ingested %d checkpoints into %s\n%s", len(input.Checkpoints), recallBrainDir, out)
+	var report recallIngestReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return fmt.Errorf("parse ingest report: %w", err)
+	}
+	fmt.Fprintf(w, "Ingested %d checkpoints into %s (%d engrams, %d graph edges)\n%s\n",
+		report.Checkpoints, recallBrainDir, report.Engrams, report.GraphEdges, recallCoverageLine(report.Coverage))
 	return nil
 }
 
@@ -125,11 +192,11 @@ func runRecallActivate(ctx context.Context, w, errW io.Writer, question string, 
 		_, err = io.WriteString(w, out)
 		return err //nolint:wrapcheck // raw passthrough of the binary's JSON
 	}
-	var hits []recallHit
-	if err := json.Unmarshal([]byte(out), &hits); err != nil {
+	var res recallOutput
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		return fmt.Errorf("parse recall output: %w", err)
 	}
-	renderRecallHits(w, question, hits)
+	renderRecallHits(w, question, res.Coverage, res.Hits)
 	return nil
 }
 
@@ -175,8 +242,60 @@ func recallBinary(root, envBin string, lookPath func(string) (string, error), ex
 	return "", errors.New("recall binary not found: run `cargo build --release` in recall/ or set ENTIRE_RECALL_BIN")
 }
 
-func renderRecallHits(w io.Writer, question string, hits []recallHit) {
-	fmt.Fprintf(w, "recall: %q\n\n", question)
+// recallCoverageLine is the one line that says what an answer was drawn from.
+// It reads "complete" only when nothing at all was missing.
+func recallCoverageLine(c recallCoverage) string {
+	if c.isComplete() {
+		return fmt.Sprintf("context: complete · %d checkpoints · graph ok", c.Total)
+	}
+	parts := []string{"context: PARTIAL", fmt.Sprintf("%d of %d checkpoints complete", c.Complete, c.Total)}
+	fields := make([]string, 0, len(c.Unavailable))
+	for f := range c.Unavailable {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	for _, f := range fields {
+		parts = append(parts, fmt.Sprintf("%d without %s", c.Unavailable[f], recallFieldWord(f)))
+	}
+	if c.Skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped", c.Skipped))
+	}
+	if c.Truncated {
+		parts = append(parts, "older checkpoints not examined (walk budget)")
+	}
+	if c.GraphAvailable {
+		parts = append(parts, "graph ok")
+	} else {
+		parts = append(parts, "graph unavailable (isolation claims unverifiable)")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// recallPartialClaimRedacted is the marker the Rust side adds when the claim
+// text itself carries a redaction placeholder (recall/src/rank.rs).
+const recallPartialClaimRedacted = "claim redacted"
+
+// recallPartialPhrase renders a hit's partial markers: the unavailable fields
+// as one clause, the redacted-claim marker as its own.
+func recallPartialPhrase(partial []string) string {
+	var fields, clauses []string
+	for _, p := range partial {
+		if p == recallPartialClaimRedacted {
+			continue
+		}
+		fields = append(fields, recallFieldWord(p))
+	}
+	if len(fields) > 0 {
+		clauses = append(clauses, strings.Join(fields, ", ")+" unavailable")
+	}
+	if slices.Contains(partial, recallPartialClaimRedacted) {
+		clauses = append(clauses, recallPartialClaimRedacted)
+	}
+	return strings.Join(clauses, "; ")
+}
+
+func renderRecallHits(w io.Writer, question string, cov recallCoverage, hits []recallHit) {
+	fmt.Fprintf(w, "recall: %q\n%s\n\n", question, recallCoverageLine(cov))
 	if len(hits) == 0 {
 		fmt.Fprintln(w, "  no memories matched; try different words or run 'entire recall ingest' again")
 		return
@@ -185,12 +304,17 @@ func renderRecallHits(w io.Writer, question string, hits []recallHit) {
 		mark := map[string]string{
 			"corroborated": "✓ corroborated",
 			"contradicted": "✗ CONTRADICTED",
+			"unverifiable": "? UNVERIFIABLE",
+			"neutral":      "· neutral",
 		}[h.Verdict]
 		if mark == "" {
-			mark = "· unverified"
+			mark = "· " + h.Verdict
 		}
 		fmt.Fprintf(w, "%2d. [%-6s] score %.2f  conf %.2f  %s\n", i+1, h.Tier, h.Scored, h.Confidence, h.Text)
 		fmt.Fprintf(w, "    %s — %s\n", mark, h.Why)
+		if len(h.Partial) > 0 {
+			fmt.Fprintf(w, "    ◌ partial context: %s\n", recallPartialPhrase(h.Partial))
+		}
 		if h.BackedBy != nil {
 			fmt.Fprintf(w, "    commit %s\n", *h.BackedBy)
 		}

@@ -13,6 +13,16 @@ use crate::model::Checkpoint;
 
 pub const CONTRADICTION_PENALTY: f32 = 0.45;
 
+/// Ceiling on the confidence of any non-ledger hit drawn from partial
+/// context. Below every corroborated hit (~0.96) and above the bare chat and
+/// intent baselines (0.30, 0.35): partial hits keep their relative order but
+/// can never outrank a fully verified one.
+pub const PARTIAL_CONFIDENCE_CAP: f32 = 0.50;
+
+/// The placeholder Entire's redaction pipeline leaves in stored transcripts.
+pub const REDACTED_MARKER: &str = "REDACTED";
+pub const PARTIAL_CLAIM_REDACTED: &str = "claim redacted";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ranked {
     pub raw: f32,
@@ -25,6 +35,10 @@ pub struct Ranked {
     pub commit: Option<String>,
     pub text: String,
     pub context: String,
+    /// What was missing when this hit was judged: the checkpoint fields the
+    /// shim declared unavailable, plus `claim redacted` when the text itself
+    /// carries a redaction marker. Empty means complete context.
+    pub partial: Vec<String>,
 }
 
 fn source_kind(p: &Option<Provenance>) -> SourceKind {
@@ -51,6 +65,17 @@ pub fn tier(kind: SourceKind) -> &'static str {
     }
 }
 
+/// What is missing from the context this claim was judged in. The inline
+/// marker is recorded but never routes the verdict: 17 of the 840 benchmark
+/// pairs carry the literal token, so touching routing would move the profile.
+pub fn partial_fields(claim: &str, cp: Option<&Checkpoint>) -> Vec<String> {
+    let mut out: Vec<String> = cp.map(|c| c.unavailable.clone()).unwrap_or_default();
+    if claim.contains(REDACTED_MARKER) {
+        out.push(PARTIAL_CLAIM_REDACTED.to_string());
+    }
+    out
+}
+
 pub fn rerank(recalls: &[RecallResult], cps: &[Checkpoint], g: &GraphReach) -> Vec<Ranked> {
     let by_sha: HashMap<&str, &Checkpoint> =
         cps.iter().map(|c| (c.commit_sha.as_str(), c)).collect();
@@ -75,11 +100,18 @@ pub fn rerank(recalls: &[RecallResult], cps: &[Checkpoint], g: &GraphReach) -> V
                 }
                 // Refuted by the ledger: the claim is evidence against itself.
                 Agree::Contradicted => ev.push(Evidence::new(SourceKind::Unknown, 0.15)),
+                // Neutral and Unverifiable add nothing: no evidence either way.
                 _ => {}
             }
             let mut confidence = recall_confidence(&ev);
             if verdict == Agree::Contradicted {
                 confidence *= CONTRADICTION_PENALTY;
+            }
+            let partial = partial_fields(&r.episode.content, cp);
+            // The commit record is complete in itself; everything judged
+            // against a partial checkpoint is capped.
+            if !partial.is_empty() && kind != SourceKind::Verified {
+                confidence = confidence.min(PARTIAL_CONFIDENCE_CAP);
             }
             let scored = r.activation * activation_multiplier(confidence);
             Ranked {
@@ -93,6 +125,7 @@ pub fn rerank(recalls: &[RecallResult], cps: &[Checkpoint], g: &GraphReach) -> V
                 commit: sha,
                 text: r.episode.content.replace('\n', " "),
                 context: r.episode.context.clone(),
+                partial,
             }
         })
         .collect();

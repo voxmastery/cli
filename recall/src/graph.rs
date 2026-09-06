@@ -13,14 +13,46 @@ use serde_json::Value;
 
 use crate::model::Checkpoint;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct GraphReach {
     edges: HashMap<String, Vec<String>>,
+    /// False when the graph was never consulted (skipped or failed). An
+    /// available graph with no edges is a finding; an unavailable one is not.
+    available: bool,
+}
+
+impl Default for GraphReach {
+    fn default() -> Self {
+        Self {
+            edges: HashMap::new(),
+            available: true,
+        }
+    }
 }
 
 impl GraphReach {
     pub fn from_map(edges: HashMap<String, Vec<String>>) -> Self {
-        Self { edges }
+        Self {
+            edges,
+            available: true,
+        }
+    }
+
+    /// The graph was not consulted: the scope check cannot run and says so.
+    pub fn unavailable() -> Self {
+        Self {
+            edges: HashMap::new(),
+            available: false,
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
+    pub fn with_availability(mut self, available: bool) -> Self {
+        self.available = available;
+        self
     }
 
     pub fn reach(&self, file: &str) -> &[String] {
@@ -68,7 +100,7 @@ impl GraphReach {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("recall: graph symbols: {e}");
-                return Self::default();
+                return Self::unavailable();
             }
         };
         let targets = symbol_lines_from_ndjson(&touched, &ndjson, SYMBOLS_PER_FILE);
@@ -93,7 +125,10 @@ impl GraphReach {
                 targets.len()
             );
         }
-        Self { edges }
+        Self {
+            edges,
+            available: true,
+        }
     }
 }
 

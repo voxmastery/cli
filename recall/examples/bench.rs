@@ -34,6 +34,7 @@ fn main() {
             files: c.files.clone(),
             session: Vec::new(),
             diff: c.diff.lines().map(str::to_string).collect(),
+            unavailable: Vec::new(),
         })
         .collect();
 

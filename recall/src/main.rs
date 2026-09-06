@@ -10,10 +10,21 @@ use std::process::ExitCode;
 use fluctlightdb::brain::FluctlightBrain;
 use recall::graph::GraphReach;
 use recall::ingest::ingest;
-use recall::model::{Checkpoint, IngestInput, IngestReport};
+use recall::model::{Checkpoint, Coverage, IngestInput, IngestReport};
 use recall::rank::{Ranked, rerank};
+use serde::Serialize;
 
 const CHECKPOINTS_FILE: &str = "checkpoints.json";
+/// Written beside the brain at ingest and returned with every answer, so an
+/// answer drawn from partial context says so.
+const COVERAGE_FILE: &str = "coverage.json";
+
+/// The activate envelope: what the hits were drawn from, then the hits.
+#[derive(Serialize)]
+struct ActivateOutput {
+    coverage: Coverage,
+    hits: Vec<Ranked>,
+}
 
 fn usage() -> ExitCode {
     eprintln!(
@@ -74,7 +85,7 @@ fn run_ingest(brain_dir: &PathBuf, no_graph: bool) -> ExitCode {
         }
     };
     let graph = if no_graph || input.repo_root.is_empty() {
-        GraphReach::default()
+        GraphReach::unavailable()
     } else {
         GraphReach::from_entire_graph(&input.repo_root, &input.checkpoints)
     };
@@ -106,11 +117,20 @@ fn run_ingest(brain_dir: &PathBuf, no_graph: bool) -> ExitCode {
         eprintln!("recall: write {CHECKPOINTS_FILE}: {e}");
         return ExitCode::FAILURE;
     }
+    let coverage = Coverage::from_input(&input, graph.is_available());
+    if let Err(e) = std::fs::write(
+        brain_dir.join(COVERAGE_FILE),
+        serde_json::to_vec(&coverage).unwrap_or_default(),
+    ) {
+        eprintln!("recall: write {COVERAGE_FILE}: {e}");
+        return ExitCode::FAILURE;
+    }
     let report = IngestReport {
         checkpoints: input.checkpoints.len(),
         engrams,
         graph_edges: graph.edge_count(),
         brain: brain_dir.display().to_string(),
+        coverage,
     };
     println!("{}", serde_json::to_string(&report).unwrap_or_default());
     ExitCode::SUCCESS
@@ -130,6 +150,21 @@ fn run_activate(brain_dir: &PathBuf, question: &str, k: usize) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // No coverage record means a brain from before coverage was tracked; an
+    // answer without one would be presented as complete by default.
+    let coverage: Coverage = match std::fs::read_to_string(brain_dir.join(COVERAGE_FILE))
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "recall: no coverage record at {} ({e}); run `entire recall ingest` again",
+                brain_dir.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let brain = match FluctlightBrain::open_readonly(brain_dir) {
         Ok(b) => b,
         Err(e) => {
@@ -140,13 +175,14 @@ fn run_activate(brain_dir: &PathBuf, question: &str, k: usize) -> ExitCode {
     let cps: &[Checkpoint] = &input.checkpoints;
     // Reach edges were folded into file engrams at ingest; rebuild the map
     // from them so the scope check sees the same graph activate did not query.
-    let graph = graph_from_brain(&brain, cps);
+    let graph = graph_from_brain(&brain, cps).with_availability(coverage.graph_available);
     let res = brain.activate_scoped(question, None, None, k.max(1) * 3);
-    let ranked: Vec<Ranked> = rerank(&res.recalls, cps, &graph)
+    let hits: Vec<Ranked> = rerank(&res.recalls, cps, &graph)
         .into_iter()
         .take(k)
         .collect();
-    println!("{}", serde_json::to_string(&ranked).unwrap_or_default());
+    let out = ActivateOutput { coverage, hits };
+    println!("{}", serde_json::to_string(&out).unwrap_or_default());
     ExitCode::SUCCESS
 }
 
