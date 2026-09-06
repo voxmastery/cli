@@ -1,0 +1,42 @@
+Record the fallback demo. Use asciinema if installed, otherwise install it (sudo apt install asciinema or pip install asciinema). Then:
+
+bash
+cd ~/Desktop/cli
+asciinema rec -t "entire recall — BTW Buildathon 2026" ~/Desktop/recall-demo.cast --overwrite
+
+Inside the recording, run exactly these three, pausing 3 seconds after each so the output can be read:
+
+bash
+/tmp/entire-dev recall ingest 2>&1 | tail -3
+/tmp/entire-dev recall "privacy boundary never drop a checkpoint" 2>/dev/null | head -6
+/tmp/entire-dev recall "sanitized persistence" 2>/dev/null | head -12
+
+Then exit to stop. Convert to a shareable form: asciinema upload ~/Desktop/recall-demo.cast gives a public URL for the Demo Video field. Also render to GIF for the README if agg is available: agg ~/Desktop/recall-demo.cast ~/Desktop/recall-demo.gif.
+
+Do not edit, script, or fabricate any output. This is evidence of the real product; it must be a live run.
+
+---
+
+subitted
+
+---
+
+are the benchmarks in the repo ?? readme in the first itself? in both main and stuff
+
+---
+
+in the video it is so slow cause its included the loading issue
+
+---
+
+cant you create a goood demo video explaining what it is and how it does what it does using higgsfield and publish into the sae url
+
+---
+
+Set up Higgsfield for me so I can generate images and videos from here.
+
+1. Install the CLI: run `npm i -g @higgsfield/cli`.
+2. Authenticate: run `higgsfield auth login` and complete the sign-in in the browser it opens.
+3. Install the companion skills: run `npx skills add higgsfield-ai/skills`.
+
+Once that's done, let me know when it's ready.
