@@ -175,3 +175,55 @@ fn impact_json_yields_file_edges_excluding_self_and_externals() {
         vec!["internal/hooks/runner.go", "internal/telemetry/emit.go"]
     );
 }
+
+#[test]
+fn url_in_claim_is_not_a_file_path() {
+    // Regression from the real transcript: the pasted brief carried a docs URL
+    // and the file check read its path segments as untouched repo paths.
+    let mut c = cp("5c81f33");
+    c.files = vec!["cmd/entire/cli/recall_cmd.go".into()];
+    let claim = "Participant guide: https://docs.google.com/document/d/REDACTED/edit and rules at \
+                 https://build.bengalurutechweek.com/ — see www.example.org and entire.io for context.";
+    let (v, why) = agreement(claim, &c, &fixture_graph());
+    assert_ne!(v, Agree::Contradicted, "{why}");
+}
+
+#[test]
+fn real_path_next_to_a_url_is_still_checked() {
+    let (v, why) = agreement(
+        "See https://example.com/docs — edited internal/auth/token.go to fix the guard.",
+        &cp("5c81f33"),
+        &fixture_graph(),
+    );
+    assert_eq!(v, Agree::Contradicted, "{why}");
+    assert!(why.contains("internal/auth/token.go"), "{why}");
+}
+
+#[test]
+fn symbol_lines_come_from_symbols_stream_for_touched_files_only() {
+    use recall::graph::symbol_lines_from_ndjson;
+    let ndjson = concat!(
+        r#"{"record_type":"symbol","kind":"function","name":"a","file_path":"x/a.go","start_line":10,"language":"Go"}"#,
+        "\n",
+        r#"{"record_type":"symbol","kind":"method","name":"b","file_path":"x/a.go","start_line":30,"language":"Go"}"#,
+        "\n",
+        r#"{"record_type":"symbol","kind":"function","name":"c","file_path":"x/a.go","start_line":50,"language":"Go"}"#,
+        "\n",
+        r#"{"record_type":"symbol","kind":"heading","name":"Title","file_path":"docs/a.md","start_line":1,"language":"Markdown"}"#,
+        "\n",
+        r#"{"record_type":"symbol","kind":"function","name":"z","file_path":"y/other.go","start_line":5,"language":"Go"}"#,
+        "\n",
+        r#"{"record_type":"summary"}"#,
+        "\n",
+    );
+    let touched = vec!["x/a.go".to_string(), "docs/a.md".to_string()];
+    let got = symbol_lines_from_ndjson(&touched, ndjson, 2);
+    assert_eq!(
+        got,
+        vec![
+            ("x/a.go".to_string(), 10usize),
+            ("x/a.go".to_string(), 30usize)
+        ],
+        "two code symbols per touched file, in line order; headings and untouched files are skipped"
+    );
+}

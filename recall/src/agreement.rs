@@ -43,11 +43,12 @@ pub fn agreement(claim: &str, cp: &Checkpoint, g: &GraphReach) -> (Agree, String
         }
     }
 
-    // 2. File: claim names a path the commit never touched.
+    // 2. File: claim names a path the commit never touched. URL segments are
+    //    not paths: a pasted link must not read as an untouched file.
     let claim_terms = terms(claim);
     for t in claim_terms
         .iter()
-        .filter(|t| t.contains('/') || t.ends_with(".go"))
+        .filter(|t| (t.contains('/') || t.ends_with(".go")) && !looks_like_url(t))
     {
         if !cp
             .files
@@ -125,7 +126,9 @@ fn missing_identifier(claim: &str, cp: &Checkpoint) -> Option<String> {
         let w = raw.trim_matches(|ch: char| {
             !ch.is_alphanumeric() && ch != '_' && ch != '.' && ch != '(' && ch != ')'
         });
-        if w.len() < 5 || !code_shaped(w) {
+        // A URL is dotted and slashed, so it looks like code; it is not a claim
+        // about the change (same guard as the file check).
+        if w.len() < 5 || !code_shaped(w) || looks_like_url(w) {
             continue;
         }
         let parts = split_ident(w);
@@ -134,4 +137,19 @@ fn missing_identifier(claim: &str, cp: &Checkpoint) -> Option<String> {
         }
     }
     None
+}
+
+const TLDS: &[&str] = &[".com", ".io", ".dev", ".org", ".net", ".ai", ".co"];
+
+/// A term is URL-shaped when it carries a scheme, a `www.` host, or a
+/// TLD-looking suffix on its first segment. `terms()` splits on `:` so a URL
+/// arrives as `https` plus `//host/path...`; the leading `//` marks the latter.
+fn looks_like_url(t: &str) -> bool {
+    if t.contains("://") || t.starts_with("//") || t.starts_with("www.") {
+        return true;
+    }
+    let host = t.split('/').next().unwrap_or(t);
+    TLDS.iter()
+        .any(|tld| host.ends_with(tld) || host.contains(&format!("{tld}/")))
+        || TLDS.iter().any(|tld| t.contains(&format!("{tld}/")))
 }
