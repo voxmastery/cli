@@ -1,0 +1,57 @@
+The Noon Curveball has been issued. Track 1 — Privacy Boundary. Verbatim:
+
+Your Checkpoint-native experience must now work with sensitive repositories.
+
+
+
+
+
+Raw prompts and transcripts must not be sent to a new external service.
+
+
+
+The product must continue to provide useful output when sensitive fields are redacted or unavailable.
+
+
+
+Existing local functionality must continue to work.
+
+
+
+The interface must clearly distinguish between complete and incomplete context.
+
+
+
+You must include at least one test using redacted or missing Checkpoint data.
+
+
+
+Use Entire Graph to identify every code path affected by this privacy boundary.
+
+
+
+Your product must never present incomplete context as a complete or authoritative result.
+
+This is a fresh session. You have no memory of this morning's work. Do not read the source first.
+
+Step 1 — reconstruct from Checkpoints. Run entire recall ingest, then query our own tool for this morning's intent, architecture, completed work, and open risks. This is the product we built; using it to resume is the point, and the scoring explicitly rewards it. Show me the output verbatim.
+
+Step 2 — Graph impact BEFORE editing. The card requires identifying every code path affected by the privacy boundary. Run entire graph impact on the functions that consume raw prompt/transcript text — start from agreement, the ingest path, and the rank path. Show me what it returns. Graph use after implementation scores in the partial band, so this must happen now.
+
+Step 3 — state the invalidated assumption, in one sentence, before proposing anything.
+
+Step 4 — propose the smallest complete response. My current thinking, which you should challenge if Graph says otherwise: add a fourth verdict Unverifiable, distinct from Neutral. Neutral means "I checked and found nothing." Unverifiable means "I could not check, the input was redacted." Checks that depend on redacted fields return Unverifiable; confidence is hard-capped when any input is redacted; output carries an explicit partial-context marker naming which fields were missing.
+
+Note we are already compliant with the external-service requirement — FluctlightDB is embedded and local, nothing leaves the machine. Make that verifiable, don't just assert it.
+
+Wait for my go-ahead before implementing.
+
+Constraints: all 15 Rust and all Go tests must still pass. Preserve the non-redacted path exactly — precision profile P 0.869 / Spec 0.927 must not move on unredacted input. Every commit carries a valid Entire-Checkpoint trailer. Do not fill the <!-- FILL --> blocks in BUILDATHON.md.
+
+---
+
+Both confirmed: envelope change yes, 0.50 cap yes. Also take the --no-transcripts flag and verify-offline.sh.
+
+Two additions. First, the 40 skipped checkpoints are the most important finding here — treat "stop dropping checkpoints" as the primary change, not a supporting one. Second, add a narrow whitelist so µs/pair, feat/fix/revert, and absolute paths outside the repo aren't read as repo paths by the file check. Whitelist only, no routing change, bench must hold at P 0.869 / R 0.270 / Spec 0.927.
+
+Implement now. Commit with a valid trailer. Report before touching BUILDATHON.md.

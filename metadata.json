@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1TSPHG6VCEC5BHG41WFSH2Q",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CLAUDE.md",
+    "cmd/entire/cli/recall_cmd.go",
+    "cmd/entire/cli/recall_cmd_test.go",
+    "cmd/entire/cli/recall_collect.go",
+    "recall/README.md",
+    "recall/examples/bench.rs",
+    "recall/scripts/verify-offline.sh",
+    "recall/src/agreement.rs",
+    "recall/src/graph.rs",
+    "recall/src/main.rs",
+    "recall/src/model.rs",
+    "recall/src/rank.rs",
+    "recall/tests/port.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1286,
+    "cache_creation_tokens": 282343,
+    "cache_read_tokens": 8067574,
+    "output_tokens": 99881,
+    "api_call_count": 43
+  }
+}
