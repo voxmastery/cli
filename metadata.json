@@ -3,7 +3,7 @@
   "checkpoint_id": "01M1TWCKXPN0HR8PKW0YQ1BZ50",
   "strategy": "manual-commit",
   "branch": "curveball-privacy",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "BUILDATHON.md"
   ],
@@ -13,14 +13,14 @@
       "transcript": "/0/full.jsonl",
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
-      "prompt": ""
+      "prompt": "/0/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 32,
-    "cache_creation_tokens": 808,
-    "cache_read_tokens": 341493,
-    "output_tokens": 1592,
-    "api_call_count": 1
+    "input_tokens": 100,
+    "cache_creation_tokens": 6739,
+    "cache_read_tokens": 1833206,
+    "output_tokens": 5047,
+    "api_call_count": 5
   }
 }

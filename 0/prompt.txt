@@ -1,0 +1,40 @@
+The curveball section is in the BUILDATHON.md file I attached earlier in this session — copy that section verbatim over the placeholder on disk.
+
+---
+
+## Noon Curveball: what changed and how I adapted
+
+**The constraint.** Track 1 — Privacy Boundary. The Checkpoint-native experience must work with sensitive repositories: raw prompts and transcripts must not go to a new external service, the product must stay useful when fields are redacted or unavailable, existing local functionality must keep working, the interface must distinguish complete from incomplete context, and it must never present incomplete context as a complete or authoritative result.
+
+**The assumption it invalidated.** My ranking pipeline assumed full transcript text is always available. All six `agreement()` checks read raw claim content, and two of them — the file check and the identifier anchor — treat *absence from the diff* as evidence that a claim is wrong. Under redaction absence is guaranteed, so those checks would convert missing evidence into confident `Contradicted` verdicts. Worse, confidence scores would keep looking authoritative while running on nothing at all.
+
+**What I found when I looked.** This was not hypothetical. The morning's ingest reported `"checkpoints": 3` — and dropped 121 others without a word. Their checkpoint refs live on an upstream remote my fork cannot read, so they were skipped, silently, and three were presented as the whole history. I was already doing exactly what the card forbids, before the card was issued.
+
+**What I changed.**
+
+A fourth verdict, `Unverifiable`, distinct from `Neutral`. `Neutral` means I checked and found nothing. `Unverifiable` means I could not check — the input was not available to me. Collapsing those two is the failure the constraint names, because it presents an incomplete check as a completed one. Each check in `agreement()` now returns `Unverifiable` when the field it depends on is declared unavailable, and an unverifiable result short-circuits rather than falling through to a later corroboration — otherwise a lexical match on a commit subject could vouch for a claim whose diff nobody read.
+
+Ingest stops dropping checkpoints. When a transcript cannot be read, the checkpoint is still emitted with its commit metadata and `unavailable: ["session"]`, so the ledger engram survives and a sensitive repository still gets commit-level recall. The same walk now ingests 125 checkpoints instead of 3, with zero silent drops.
+
+Availability is declared, never inferred. The shim states which fields are missing on the wire type; ingest records whether the graph was available. Detection is explicit rather than guessed from emptiness — an inline redaction marker adds the partial marker and the confidence cap but never changes a verdict. This matters because the benchmark contains commits with empty diffs and empty file lists; routing on emptiness would have moved the numbers.
+
+Confidence is capped, not merely lowered. Any non-ledger hit drawn from a partial checkpoint is clamped to 0.50 after all other scoring. That sits above the 0.30 and 0.35 baselines and below a corroborated hit near 0.96, so partial context can rank but can never outrank fully verified context. Ledger hits keep their confidence — the commit record is itself complete — but carry the partial marker.
+
+Coverage is structural, not decorative. `activate` returns `{"coverage": ..., "hits": [...]}` rather than a bare array, so a machine consumer can tell partial from complete. Text output opens with the context line before any result:
+
+    PARTIAL · 4 of 125 checkpoints complete · 121 without transcript
+            · older checkpoints not examined (walk budget) · graph ok
+
+A reader who sees only the first line still learns the context was incomplete. Per-hit, `? UNVERIFIABLE` renders distinctly from `· neutral`, and partial hits carry `◌ partial context: transcript unavailable`. A brain with no coverage record refuses to activate rather than defaulting to "complete".
+
+I also added `--no-transcripts`, which never opens session content at all and marks every checkpoint `unavailable: ["session"]` by policy. It is the demonstration path for a sensitive repository, and it answers the residual that the brain directory holds a second local copy of transcript text.
+
+**What I deliberately did not change.** The unredacted path. Verdict routing changes only when an unavailable field or `graph_available: false` is present, so unredacted input takes a byte-identical path through `agreement()`. The six-check order is unchanged. The benchmark was re-run after the final edit and holds exactly: P 0.869 / R 0.270 / Spec 0.927.
+
+That constraint forced one narrowing. A whitelist rule skipping every token beginning with `/` moved the profile to P 0.882 / Spec 0.937, because the corpus contains forge refs like `/gh/...` that the file check judges correctly. The rule was narrowed to machine-absolute roots only, measured rule by rule until the profile held.
+
+**Why the new result is safe.** Nothing new leaves the machine: FluctlightDB is an embedded library, the brain directory is local and gitignored, and Entire Graph runs locally. `verify-offline` traces `ingest` and `activate` under `strace` and records zero network syscalls across every traced process. Incomplete context is structurally incapable of outranking complete context, because the cap is applied after scoring rather than as a soft penalty. And no result set can be read as complete when it is not, because coverage is printed before the results and encoded in the JSON envelope.
+
+**How I resumed.** The fresh session had no memory of the morning. Its first action was not to read source — it was to run `entire recall ingest` and query the checkpoint history for the morning's intent, architecture, completed work and open risks. Reconstruction came from the product itself, then Entire Graph impact analysis on every consumer of raw prompt and transcript text, and only then any edit.
+
+**One defect a live run caught that unit tests could not.** Nil Go slices marshalled as JSON `null`, which the Rust side rejected — the first real `--no-transcripts` ingest wiped the brain and failed. Both sides now carry a regression test: the shim emits `[]`, the crate accepts `null` as empty.
