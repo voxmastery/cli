@@ -1,6 +1,1 @@
-Both corrections are right, amend them.
-
-Replace "the benchmark contains commits with empty diffs and empty file lists; routing on emptiness would have moved the numbers" with: "17 pairs in the benchmark carry a literal REDACTED token and 65 contain isolation words, and the bench runs with an empty graph. Routing on a marker, or treating an empty graph as an unavailable one, would have moved the numbers."
-Replace "dropped 121 others" with "dropped 122 others" — that's the pre-curveball HEAD figure, which is the number the sentence is about.
-
-Then amend checkpoint #4 with the same trailer and confirm the two sections agree.
+Rebuild on curveball-privacy, go ahead

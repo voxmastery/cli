@@ -3,23 +3,22 @@
   "checkpoint_id": "01M1TWCKXPN0HR8PKW0YQ1BZ50",
   "session_id": "a18af583-9099-4691-a142-a7f1c592aca2",
   "strategy": "manual-commit",
-  "created_at": "2026-09-06T08:26:43.502183875Z",
-  "branch": "curveball-privacy",
+  "created_at": "2026-09-06T08:58:12.521630539Z",
   "checkpoints_count": 1,
   "files_touched": [
     "BUILDATHON.md"
   ],
   "agent": "Claude Code",
   "model": "claude-fable-5-1",
-  "turn_id": "cb29a0a9f2ee",
-  "checkpoint_transcript_start": 1899,
-  "transcript_lines_at_start": 1899,
-  "compact_transcript_start": 82,
+  "turn_id": "064ca96e4ddd",
+  "checkpoint_transcript_start": 2126,
+  "transcript_lines_at_start": 2126,
+  "compact_transcript_start": 97,
   "token_usage": {
     "input_tokens": 34,
-    "cache_creation_tokens": 1155,
-    "cache_read_tokens": 746093,
-    "output_tokens": 569,
+    "cache_creation_tokens": 959,
+    "cache_read_tokens": 771955,
+    "output_tokens": 1006,
     "api_call_count": 2
   },
   "skill_events_version": 1,
@@ -35,7 +34,7 @@
         "signal": "skill_tool_use",
         "confidence": "explicit"
       },
-      "turn_id": "abd6a2cceda9",
+      "turn_id": "8a3808ee9fb6",
       "transcript_anchor": {
         "unit": "line",
         "start": 693,
@@ -57,18 +56,18 @@
     }
   ],
   "session_metrics": {
-    "turn_count": 5
+    "turn_count": 1
   },
   "initial_attribution": {
-    "calculated_at": "2026-09-06T08:26:43.355838471Z",
-    "agent_lines": 2,
-    "agent_removed": 2,
+    "calculated_at": "2026-09-06T08:58:12.34629941Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
     "human_added": 0,
     "human_modified": 0,
     "human_removed": 0,
-    "total_committed": 2,
-    "total_lines_changed": 4,
-    "agent_percentage": 100,
+    "total_committed": 0,
+    "total_lines_changed": 0,
+    "agent_percentage": 0,
     "metric_version": 2
   },
   "prompt_attributions": [
