@@ -2,7 +2,7 @@
 //!
 //! The Go side (`entire recall`) reads checkpoint storage and pipes JSON in;
 //! this crate owns every ranking decision. The algorithm is a port of the
-//! validated reference (see `docs/recall/checkpoint-1-architecture.md`).
+//! validated reference (see `docs/recall/design.md`).
 
 pub mod agreement;
 pub mod graph;

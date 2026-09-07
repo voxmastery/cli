@@ -1,8 +1,3 @@
-> ## BTW Buildathon 2026 — Track 1 submission: `entire recall`
-> Trust-ranked checkpoint memory: ranks Checkpoint context by how much it can
-> be trusted, not by keyword match. **See [BUILDATHON.md](BUILDATHON.md).**
-> Code: [`recall/`](recall/) (Rust engine) and `cmd/entire/cli/recall_*.go` (Go shim).
-
 # Entire CLI
 
 Entire hooks into your Git workflow to capture AI agent sessions as you work. Sessions are indexed alongside commits, creating a searchable record of how code was written in your repo.
